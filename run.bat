@@ -1,0 +1,2 @@
+zig build
+.\zig-out\bin\zig_regex.exe
