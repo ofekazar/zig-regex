@@ -18,22 +18,67 @@ pub fn main() !void {
     }
     const allocator = gpa.allocator();
 
-    var state_arena = std.heap.ArenaAllocator.init(allocator);
-    defer state_arena.deinit();
-    const state_allocator = state_arena.allocator();
-
-    const pattern = "a(b|cd)*e+";
+    const pattern = "a?(bc|de)(f|g)?h+";
+    // const pattern = "a+";
     std.debug.print("before: {s}\n", .{pattern});
     var postfix = try raw2postfix(allocator, pattern);
     defer postfix.deinit(allocator);
     try debugprintpostfix(allocator, postfix.items);
-    const nfavm = try postfix2nfavm(allocator, state_allocator, postfix.items);
-    try nfatree2instructions(state_allocator, nfavm);
+    var instructions = try nfatree2instructions(allocator, postfix.items);
+    defer instructions.deinit(allocator);
+    // TODO TRY THE TEST THINGY
+    const result = try match(allocator, instructions, "deahhhh");
+    std.debug.print("result is: {}\n", .{result});
+    // match
     // try raw2postfix(allocator, "(ab|cd)+ef");
     // try raw2postfix(allocator, "a?(b|cd)e*");
     // try raw2postfix(allocator, "(ab(c|d))|ef");
     // try raw2postfix(allocator, "a(b|c(d|e))f");
 
+}
+
+const Registers = struct{
+    ip: u32 = 0,  // Instruction Pointer
+    sp: u32 = 0,  // Source Pointer
+};
+
+pub fn match(
+    allocator: std.mem.Allocator,
+    instructions: std.ArrayList(Instruction),
+    data: []const u8
+) !bool {
+    var found = false;
+    var registers = Registers{};
+    var backprop: std.ArrayList(u32) = .empty;
+    defer backprop.deinit(allocator);
+
+    while (registers.ip < instructions.items.len) {
+        const instruction = instructions.items[registers.ip];
+        switch(instruction.type) {
+            .char => {
+                if (registers.sp < data.len and data[registers.sp] == @as(u8, @intCast(instruction.a.?))) {
+                    registers.ip += 1;
+                    registers.sp += 1;
+                } else {
+                    registers.ip = backprop.pop() orelse break;
+                }
+            },
+            .jump => registers.ip = instruction.a.?,
+            .split => {
+                try backprop.append(allocator, instruction.b.?);
+                registers.ip = instruction.a.?;
+            },
+            .match => {
+                if (registers.sp == data.len) {
+                    found = true;
+                    break;
+                } else {
+                    registers.ip = backprop.pop() orelse break;
+                }
+            },
+        }
+    }
+    return found;
 }
 
 const Operation = enum(u16) { // Bigger is higher precedence
@@ -319,6 +364,7 @@ pub fn postfix2nfavm(
                     outs = .empty;
                 },
                 .qm => {
+                    // TODO A question mark causes a double jump
                     var b = fragments.pop() orelse return error.InvalidPostfix;
                     defer b.outs.deinit(temp_allocator);
                     const state = try state_allocator.create(State);
@@ -397,43 +443,47 @@ pub fn debugprintpostfix(allocator: std.mem.Allocator, outputqueue: []const u16)
 
 fn nfatree2instructions(
     allocator: std.mem.Allocator,
-    base: *State,
-) !void {
-    // char
-    // match
-    // jmp
-    // split
+    postfix: []const u16,
+) !std.ArrayList(Instruction) {
+    var state_arena = std.heap.ArenaAllocator.init(allocator);
+    defer state_arena.deinit();
+    const state_allocator = state_arena.allocator();
+    const base = try postfix2nfavm(allocator, state_allocator, postfix);
 
     var seen = std.AutoHashMap(*State, u32).init(allocator);
+    defer seen.deinit();
 
     const BackpropData = struct {
         state: *State,
         split_index: usize,
     };
 
-    var backprop: std.ArrayList(BackpropData) = .empty;
     var current_state = base;
-    var instructions: std.ArrayList(Instruction) = .empty;
+    var backprop: std.ArrayList(BackpropData) = .empty;
+    defer backprop.deinit(allocator);
+
+    var output_instructions: std.ArrayList(Instruction) = .empty;
+    errdefer output_instructions.deinit(allocator);
 
     while (true) {
         if (seen.get(current_state)) |index| {
-            try instructions.append(allocator, .{
+            try output_instructions.append(allocator, .{
                 .type = .jump,
                 .a = index,
                 .b = null,
             });
             const bp = backprop.pop() orelse break;
             current_state = bp.state;
-            instructions.items[bp.split_index].b =
-                std.math.cast(u32, instructions.items.len) orelse return error.TooManyIntstructions;
+            output_instructions.items[bp.split_index].b =
+                std.math.cast(u32, output_instructions.items.len) orelse return error.TooManyIntstructions;
         }
         else if (current_state.c < 256) {
-            try instructions.append(allocator, .{
+            try output_instructions.append(allocator, .{
                 .type = .char,
                 .a = current_state.c,
                 .b = null,
             });
-            const index = std.math.cast(u32, instructions.items.len - 1) orelse return error.TooManyIntstructions;
+            const index = std.math.cast(u32, output_instructions.items.len - 1) orelse return error.TooManyIntstructions;
             try seen.put(current_state, index);
             current_state = current_state.out.?;
         }
@@ -446,44 +496,45 @@ fn nfatree2instructions(
                     if (seen.get(current_state.out.?)) |out_state_index| {
                         current_state = current_state.out1.?;
                         a = out_state_index;
-                        b = std.math.cast(u32, instructions.items.len + 1) orelse return error.TooManyIntstructions;
+                        b = std.math.cast(u32, output_instructions.items.len + 1) orelse return error.TooManyIntstructions;
                     } else {
                         try backprop.append(allocator, .{
-                            .split_index = instructions.items.len,
+                            .split_index = output_instructions.items.len,
                             .state = current_state.out1.?
                         });
-                        a = std.math.cast(u32, instructions.items.len + 1) orelse return error.TooManyIntstructions;
+                        a = std.math.cast(u32, output_instructions.items.len + 1) orelse return error.TooManyIntstructions;
                         b = 0;
                         current_state = current_state.out.?;
                     }
 
-                    try instructions.append(allocator, .{
+                    try output_instructions.append(allocator, .{
                         .type = .split,
                         .a = a,
                         .b = b,
                     });
-                    const index = std.math.cast(u32, instructions.items.len - 1) orelse return error.TooManyIntstructions;
+                    const index = std.math.cast(u32, output_instructions.items.len - 1) orelse return error.TooManyIntstructions;
                     try seen.put(split_state, index);
                 },
                 .match => {
-                    try instructions.append(allocator, .{
+                    try output_instructions.append(allocator, .{
                         .type = .match,
                         .a = null,
                         .b = null,
                     });
-                    const index = std.math.cast(u32, instructions.items.len - 1) orelse return error.TooManyIntstructions;
+                    const index = std.math.cast(u32, output_instructions.items.len - 1) orelse return error.TooManyIntstructions;
                     try seen.put(current_state, index);
 
                     const bp = backprop.pop() orelse break;
                     current_state = bp.state;
-                    instructions.items[bp.split_index].b =
-                        std.math.cast(u32, instructions.items.len) orelse return error.TooManyIntstructions;
+                    output_instructions.items[bp.split_index].b =
+                        std.math.cast(u32, output_instructions.items.len) orelse return error.TooManyIntstructions;
                 }
             }
         }
     }
 
-    try debugPrintInstructionGroups(instructions);
+    try debugPrintInstructionGroups(output_instructions);
+    return output_instructions;
 }
 
 pub fn debugPrintInstructionGroups(
