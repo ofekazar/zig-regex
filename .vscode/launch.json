@@ -2,12 +2,14 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "type": "lldb",
+            "name": "Debug Zig with Visual Studio Debugger",
+            "type": "cppvsdbg",
             "request": "launch",
-            "name": "Debug Zig",
             "program": "${workspaceFolder}/zig-out/bin/zig_regex.exe",
-            "args": [],
-            "cwd": "${workspaceFolder}"
+            "cwd": "${workspaceFolder}",
+            "stopAtEntry": false,
+            "console": "integratedTerminal",
+            "preLaunchTask": "zig build"
         }
     ]
 }
