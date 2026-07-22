@@ -6,6 +6,7 @@ const RegexError = error{
     InvalidOperator,
     InvalidPostfix,
     TooManyInstructions,
+    MemberedSetValueOutOfRange,
 };
 
 // TODO add capture groups
@@ -14,6 +15,7 @@ const RegexError = error{
 // TODO Add bol/f and eol/f
 // TODO Add counted repeatitions
 // TODO implement with threads instead of backtracking
+// TODO remove the extra jump in qm
 
 pub fn main(init: std.process.Init) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
@@ -23,11 +25,6 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("Memory leak detected in gpa\n", .{});
         }
     }
-
-    var x: u32 = 8;
-    x += 1;
-    std.debug.print("x is: {d}\n", .{x});
-
     const allocator = gpa.allocator();
 
     const pattern = "a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?aaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -40,10 +37,15 @@ pub fn main(init: std.process.Init) !void {
     var instructions = try nfatree2instructions(allocator, postfix.items);
     defer instructions.deinit(allocator);
 
-    const start = std.Io.Clock.awake.now(init.io);
-    const result = try match_backtracking(allocator, instructions, text);
-    const elapsed_backtracking = start.untilNow(init.io, .awake);
-    std.debug.print("result is: {}. backtracking took: {d} \n", .{result, elapsed_backtracking.toMilliseconds()});
+    // const start = std.Io.Clock.awake.now(init.io);
+    // const result = try match_backtracking(allocator, instructions, text);
+    // const elapsed_backtracking = start.untilNow(init.io, .awake);
+    // std.debug.print("backtracking result is: {}. backtracking took: {d} \n", .{result, elapsed_backtracking.toMilliseconds()});
+
+    const start2 = std.Io.Clock.awake.now(init.io);
+    const result2 = try match_thompson(allocator, instructions, text);
+    const elapsed2 = start2.untilNow(init.io, .awake);
+    std.debug.print("thompson result is: {}. thompson took: {d} \n", .{result2, elapsed2.toMilliseconds()});
     // match
     // try raw2postfix(allocator, "(ab|cd)+ef");
     // try raw2postfix(allocator, "a?(b|cd)e*");
@@ -98,6 +100,147 @@ pub fn match_backtracking(
     }
     return found;
 }
+
+
+// const Thread = struct{
+//     ip: u32 = 0,
+// };
+
+const Thread = u32;
+
+const MemberedSet = struct{
+    const Self = @This();
+
+    present: []bool,
+    items: []usize,
+    len: usize,
+    capacity: usize,
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator, capacity: usize) !Self {
+        const present = try allocator.alloc(bool, capacity);
+        errdefer allocator.free(present);
+        const items = try allocator.alloc(usize, capacity);
+        errdefer allocator.free(present);
+
+        @memset(present, false);
+
+        return .{
+            .present = present,
+            .items = items,
+            .len = 0,
+            .capacity = capacity,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.allocator.free(self.present);
+        self.allocator.free(self.items);
+    }
+
+    pub fn clear(self: *Self) void {
+        @memset(self.present, false);
+        self.len = 0;
+    }
+
+    pub fn add(self: *Self, value: usize) !void {
+        if (value >= self.capacity) {
+            return error.MemberedSetValueOutOfRange;
+        } else if (self.present[value]) {
+            return;
+        } else if (self.len+1 >= self.capacity) {
+            unreachable;
+        }
+
+        self.items[self.len] = value;
+        self.len += 1;
+        self.present[value] = true;
+    }
+};
+
+const Threads = struct{
+    const Self = @This();
+
+    l1: MemberedSet, // TODO Test a Set.. Probably slower for most cases but should have better scaling
+    l2: MemberedSet,
+
+    current_l1: bool = true,
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator, capacity: usize) !Self {
+        var l1 = try MemberedSet.init(allocator, capacity);
+        errdefer l1.deinit();
+        var l2 = try MemberedSet.init(allocator, capacity);
+        errdefer l2.deinit();
+        return .{
+            .l1 = l1,
+            .l2 = l2,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.l1.deinit();
+        self.l2.deinit();
+        self.* = undefined;
+    }
+
+    pub fn current(self: *Self) *MemberedSet {
+        return if (self.current_l1) &self.l1 else &self.l2;
+    }
+
+    pub fn other(self: *Self) *MemberedSet {
+        return if (self.current_l1) &self.l2 else &self.l1;
+    }
+
+    pub fn swap(self: *Self) void {
+        self.current_l1 = !self.current_l1;
+    }
+};
+
+pub fn match_thompson(
+    allocator: std.mem.Allocator,
+    instructions: std.ArrayList(Instruction),
+    data: []const u8
+) !bool {
+    var threads = try Threads.init(allocator, instructions.items.len);
+    defer threads.deinit();
+    try threads.current().add(0);
+    for (data, 0..) |c, sp| {
+        var i: usize = 0;
+        while (i < threads.current().len) : (i += 1) {
+            const ip = threads.current().items[i];
+            const instruction = instructions.items[ip];
+            switch(instruction.type) {
+                .char => {
+                    if (sp < data.len and c == @as(u8, @intCast(instruction.a.?))) {
+                        try threads.other().add(ip+1);
+                    }
+                },
+                .jump => try threads.current().add(instruction.a.?),
+                .split => {
+                    try threads.current().add(instruction.a.?);
+                    try threads.current().add(instruction.b.?);
+                },
+                .match => {
+                    if (sp == data.len) {
+                        return true;
+                    }
+                },
+            }
+        }
+        threads.current().clear();
+        threads.swap();
+    }
+    return false;
+}
+
+// pub fn match_thompson_with_custom_threadset(
+//     allocator: std.mem.Allocator,
+//     instructions: std.ArrayList(Instruction),
+//     data: []const u8
+// ) !bool {
 
 const Operation = enum(u16) { // Bigger is higher precedence
     concat = 256, // implicit
