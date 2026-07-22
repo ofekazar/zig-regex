@@ -8,7 +8,14 @@ const RegexError = error{
     TooManyInstructions,
 };
 
-pub fn main() !void {
+// TODO add capture groups
+// TODO add lazy operators
+// TODO Build a test suite
+// TODO Add bol/f and eol/f
+// TODO Add counted repeatitions
+// TODO implement with threads instead of backtracking
+
+pub fn main(init: std.process.Init) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer {
         const status = gpa.deinit();
@@ -16,9 +23,15 @@ pub fn main() !void {
             std.debug.print("Memory leak detected in gpa\n", .{});
         }
     }
+
+    var x: u32 = 8;
+    x += 1;
+    std.debug.print("x is: {d}\n", .{x});
+
     const allocator = gpa.allocator();
 
-    const pattern = "a?(bc|de)(f|g)?h+";
+    const pattern = "a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?aaaaaaaaaaaaaaaaaaaaaaaaa";
+    const text = "aaaaaaaaaaaaaaaaaaaaaaaaa";
     // const pattern = "a+";
     std.debug.print("before: {s}\n", .{pattern});
     var postfix = try raw2postfix(allocator, pattern);
@@ -26,9 +39,11 @@ pub fn main() !void {
     try debugprintpostfix(allocator, postfix.items);
     var instructions = try nfatree2instructions(allocator, postfix.items);
     defer instructions.deinit(allocator);
-    // TODO TRY THE TEST THINGY
-    const result = try match(allocator, instructions, "deahhhh");
-    std.debug.print("result is: {}\n", .{result});
+
+    const start = std.Io.Clock.awake.now(init.io);
+    const result = try match_backtracking(allocator, instructions, text);
+    const elapsed_backtracking = start.untilNow(init.io, .awake);
+    std.debug.print("result is: {}. backtracking took: {d} \n", .{result, elapsed_backtracking.toMilliseconds()});
     // match
     // try raw2postfix(allocator, "(ab|cd)+ef");
     // try raw2postfix(allocator, "a?(b|cd)e*");
@@ -42,15 +57,15 @@ const Registers = struct{
     sp: u32 = 0,  // Source Pointer
 };
 
-pub fn match(
+pub fn match_backtracking(
     allocator: std.mem.Allocator,
     instructions: std.ArrayList(Instruction),
     data: []const u8
 ) !bool {
     var found = false;
     var registers = Registers{};
-    var backprop: std.ArrayList(u32) = .empty;
-    defer backprop.deinit(allocator);
+    var backtrack: std.ArrayList(Registers) = .empty;
+    defer backtrack.deinit(allocator);
 
     while (registers.ip < instructions.items.len) {
         const instruction = instructions.items[registers.ip];
@@ -60,12 +75,15 @@ pub fn match(
                     registers.ip += 1;
                     registers.sp += 1;
                 } else {
-                    registers.ip = backprop.pop() orelse break;
+                    registers = backtrack.pop() orelse break;
                 }
             },
             .jump => registers.ip = instruction.a.?,
             .split => {
-                try backprop.append(allocator, instruction.b.?);
+                try backtrack.append(allocator, Registers{
+                    .ip = instruction.b.?,
+                    .sp = registers.sp,
+                });
                 registers.ip = instruction.a.?;
             },
             .match => {
@@ -73,7 +91,7 @@ pub fn match(
                     found = true;
                     break;
                 } else {
-                    registers.ip = backprop.pop() orelse break;
+                    registers = backtrack.pop() orelse break;
                 }
             },
         }
