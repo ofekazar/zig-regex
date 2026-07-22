@@ -29,23 +29,25 @@ pub fn main(init: std.process.Init) !void {
 
     const pattern = "a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?aaaaaaaaaaaaaaaaaaaaaaaaa";
     const text = "aaaaaaaaaaaaaaaaaaaaaaaaa";
-    // const pattern = "a+";
+    // const pattern = "a+b";
+    // const text = "aab";
     std.debug.print("before: {s}\n", .{pattern});
     var postfix = try raw2postfix(allocator, pattern);
     defer postfix.deinit(allocator);
     try debugprintpostfix(allocator, postfix.items);
     var instructions = try nfatree2instructions(allocator, postfix.items);
+    // try debugPrintInstructionGroups(instructions);
     defer instructions.deinit(allocator);
 
-    // const start = std.Io.Clock.awake.now(init.io);
-    // const result = try match_backtracking(allocator, instructions, text);
-    // const elapsed_backtracking = start.untilNow(init.io, .awake);
-    // std.debug.print("backtracking result is: {}. backtracking took: {d} \n", .{result, elapsed_backtracking.toMilliseconds()});
+    const start = std.Io.Clock.awake.now(init.io);
+    const result = try match_backtracking(allocator, instructions, text);
+    const elapsed_backtracking = start.untilNow(init.io, .awake);
+    std.debug.print("backtracking result is: {}. backtracking took: {d} ns\n", .{result, elapsed_backtracking.toNanoseconds()});
 
     const start2 = std.Io.Clock.awake.now(init.io);
     const result2 = try match_thompson(allocator, instructions, text);
     const elapsed2 = start2.untilNow(init.io, .awake);
-    std.debug.print("thompson result is: {}. thompson took: {d} \n", .{result2, elapsed2.toMilliseconds()});
+    std.debug.print("thompson result is: {}. thompson took: {d} \n", .{result2, elapsed2.toNanoseconds()});
     // match
     // try raw2postfix(allocator, "(ab|cd)+ef");
     // try raw2postfix(allocator, "a?(b|cd)e*");
@@ -140,7 +142,10 @@ const MemberedSet = struct{
     }
 
     pub fn clear(self: *Self) void {
-        @memset(self.present, false);
+        var i: usize = 0;
+        while (i < self.len) : (i += 1) {
+            self.present[self.items[i]] = false;
+        }
         self.len = 0;
     }
 
@@ -207,14 +212,17 @@ pub fn match_thompson(
     var threads = try Threads.init(allocator, instructions.items.len);
     defer threads.deinit();
     try threads.current().add(0);
-    for (data, 0..) |c, sp| {
+    var sp: usize = 0;
+    while (sp <= data.len) : (sp += 1) {
         var i: usize = 0;
+        const current = threads.current();
+        _ = current;
         while (i < threads.current().len) : (i += 1) {
             const ip = threads.current().items[i];
             const instruction = instructions.items[ip];
             switch(instruction.type) {
                 .char => {
-                    if (sp < data.len and c == @as(u8, @intCast(instruction.a.?))) {
+                    if (sp < data.len and data[sp] == @as(u8, @intCast(instruction.a.?))) {
                         try threads.other().add(ip+1);
                     }
                 },
@@ -694,7 +702,6 @@ fn nfatree2instructions(
         }
     }
 
-    try debugPrintInstructionGroups(output_instructions);
     return output_instructions;
 }
 
