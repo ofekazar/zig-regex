@@ -9,6 +9,12 @@ const RegexError = error{
     MemberedSetValueOutOfRange,
 };
 
+// TODO in pike vm, aggressively insert split and jump operation to keep priority
+// When a match is found, any lower priority threads should be removed, and result saved in a pointer
+// the higher priority threads should try to keep matching, any new matches should replace the saved pointer.
+// when all option are exausted, return the match. This is not a full match implementation. Our full match implementation
+// is already solid.
+
 // TODO add capture groups
 // TODO add lazy operators
 // TODO Build a test suite
@@ -16,6 +22,8 @@ const RegexError = error{
 // TODO Add counted repeatitions
 // TODO implement with threads instead of backtracking
 // TODO remove the extra jump in qm
+// TODO remove tree stracture step, optimize compiler
+
 
 pub fn main(init: std.process.Init) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
@@ -39,11 +47,6 @@ pub fn main(init: std.process.Init) !void {
     // try debugPrintInstructionGroups(instructions);
     defer instructions.deinit(allocator);
 
-    const start = std.Io.Clock.awake.now(init.io);
-    const result = try match_backtracking(allocator, instructions, text);
-    const elapsed_backtracking = start.untilNow(init.io, .awake);
-    std.debug.print("backtracking result is: {}. backtracking took: {d} ns\n", .{result, elapsed_backtracking.toNanoseconds()});
-
     const start2 = std.Io.Clock.awake.now(init.io);
     const result2 = try match_thompson(allocator, instructions, text);
     const elapsed2 = start2.untilNow(init.io, .awake);
@@ -54,53 +57,6 @@ pub fn main(init: std.process.Init) !void {
     // try raw2postfix(allocator, "(ab(c|d))|ef");
     // try raw2postfix(allocator, "a(b|c(d|e))f");
 
-}
-
-const Registers = struct{
-    ip: u32 = 0,  // Instruction Pointer
-    sp: u32 = 0,  // Source Pointer
-};
-
-pub fn match_backtracking(
-    allocator: std.mem.Allocator,
-    instructions: std.ArrayList(Instruction),
-    data: []const u8
-) !bool {
-    var found = false;
-    var registers = Registers{};
-    var backtrack: std.ArrayList(Registers) = .empty;
-    defer backtrack.deinit(allocator);
-
-    while (registers.ip < instructions.items.len) {
-        const instruction = instructions.items[registers.ip];
-        switch(instruction.type) {
-            .char => {
-                if (registers.sp < data.len and data[registers.sp] == @as(u8, @intCast(instruction.a.?))) {
-                    registers.ip += 1;
-                    registers.sp += 1;
-                } else {
-                    registers = backtrack.pop() orelse break;
-                }
-            },
-            .jump => registers.ip = instruction.a.?,
-            .split => {
-                try backtrack.append(allocator, Registers{
-                    .ip = instruction.b.?,
-                    .sp = registers.sp,
-                });
-                registers.ip = instruction.a.?;
-            },
-            .match => {
-                if (registers.sp == data.len) {
-                    found = true;
-                    break;
-                } else {
-                    registers = backtrack.pop() orelse break;
-                }
-            },
-        }
-    }
-    return found;
 }
 
 
@@ -244,12 +200,6 @@ pub fn match_thompson(
     return false;
 }
 
-// pub fn match_thompson_with_custom_threadset(
-//     allocator: std.mem.Allocator,
-//     instructions: std.ArrayList(Instruction),
-//     data: []const u8
-// ) !bool {
-
 const Operation = enum(u16) { // Bigger is higher precedence
     concat = 256, // implicit
     split, // |
@@ -258,15 +208,6 @@ const Operation = enum(u16) { // Bigger is higher precedence
     qm, // ?
     // any, // - will end up as .
 };
-
-// fn push_operator(
-//     allocator: std.mem.Allocator,
-//     outputqueue: *std.ArrayList(u16),
-//     operatorqueue: *std.ArrayList(u8),
-//     new_operator: Operation,
-// ) !void {
-
-// }
 
 pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !std.ArrayList(u16) {
     var outputqueue: std.ArrayList(u16) = .empty;
@@ -610,6 +551,9 @@ pub fn debugprintpostfix(allocator: std.mem.Allocator, outputqueue: []const u16)
     std.debug.print("{s}\n", .{printable.items});
 }
 
+
+/// This function takes the nfa treelike structure and builds the instruction list
+/// from it.
 fn nfatree2instructions(
     allocator: std.mem.Allocator,
     postfix: []const u16,
