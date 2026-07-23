@@ -48,7 +48,7 @@ pub fn main(init: std.process.Init) !void {
     defer instructions.deinit(allocator);
 
     const start2 = std.Io.Clock.awake.now(init.io);
-    const result2 = try match_thompson(allocator, instructions, text);
+    const result2 = try match(allocator, instructions, text);
     const elapsed2 = start2.untilNow(init.io, .awake);
     std.debug.print("thompson result is: {}. thompson took: {d} \n", .{result2, elapsed2.toNanoseconds()});
     // match
@@ -79,7 +79,7 @@ const MemberedSet = struct{
         const present = try allocator.alloc(bool, capacity);
         errdefer allocator.free(present);
         const items = try allocator.alloc(usize, capacity);
-        errdefer allocator.free(present);
+        errdefer allocator.free(items);
 
         @memset(present, false);
 
@@ -110,7 +110,7 @@ const MemberedSet = struct{
             return error.MemberedSetValueOutOfRange;
         } else if (self.present[value]) {
             return;
-        } else if (self.len+1 >= self.capacity) {
+        } else if (self.len >= self.capacity) {
             unreachable;
         }
 
@@ -160,7 +160,7 @@ const Threads = struct{
     }
 };
 
-pub fn match_thompson(
+pub fn match(
     allocator: std.mem.Allocator,
     instructions: std.ArrayList(Instruction),
     data: []const u8
@@ -168,11 +168,10 @@ pub fn match_thompson(
     var threads = try Threads.init(allocator, instructions.items.len);
     defer threads.deinit();
     try threads.current().add(0);
+
     var sp: usize = 0;
     while (sp <= data.len) : (sp += 1) {
         var i: usize = 0;
-        const current = threads.current();
-        _ = current;
         while (i < threads.current().len) : (i += 1) {
             const ip = threads.current().items[i];
             const instruction = instructions.items[ip];
@@ -182,22 +181,40 @@ pub fn match_thompson(
                         try threads.other().add(ip+1);
                     }
                 },
-                .jump => try threads.current().add(instruction.a.?),
-                .split => {
-                    try threads.current().add(instruction.a.?);
-                    try threads.current().add(instruction.b.?);
-                },
                 .match => {
                     if (sp == data.len) {
                         return true;
                     }
                 },
+                else => {
+                    try get_next_instruction(threads.current(), instructions.items, ip);
+                }
             }
         }
         threads.current().clear();
         threads.swap();
     }
     return false;
+}
+
+fn get_next_instruction(
+    out: *MemberedSet,
+    instructions: []const Instruction,
+    ip: usize,
+) !void {
+    const inst = instructions[ip];
+    switch(inst.type) {
+        .split => {
+            try get_next_instruction(out, instructions, inst.a.?);
+            try get_next_instruction(out, instructions, inst.b.?);
+        },
+        .jump => {
+            try get_next_instruction(out, instructions, inst.a.?);
+        },
+        else => {
+            try out.add(ip);
+        },
+    }
 }
 
 const Operation = enum(u16) { // Bigger is higher precedence
