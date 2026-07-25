@@ -26,7 +26,6 @@ const RegexError = error{
 
 
 pub fn main(init: std.process.Init) !void {
-    _ = init;
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer {
         const status = gpa.deinit();
@@ -37,7 +36,7 @@ pub fn main(init: std.process.Init) !void {
     const allocator = gpa.allocator();
 
     const pattern = "a(b)|(c)";
-    // const text = "aabb";
+    const text = "c";
     // const pattern = "a+b";
     // const text = "aab";
     std.debug.print("before: {s}\n", .{pattern});
@@ -45,16 +44,26 @@ pub fn main(init: std.process.Init) !void {
     defer postfix.deinit(allocator);
     try debugprintpostfix(allocator, postfix.items);
 
-    // var instructions = try postfix2vm(allocator, postfix.items);
-    // // try debugPrintInstructionGroups(instructions);
-    // defer instructions.deinit(allocator);
+    var program = try postfix2vm(allocator, postfix.items);
+    defer program.instructions.deinit(allocator);
+    // try debugPrintInstructionGroups(program.instructions);
 
-    // const start2 = std.Io.Clock.awake.now(init.io);
-    // saved = try allocator.alloc(u32, groups_counte*2);
-    // errdefer allocator.free(saved);
-    // const result2 = try match(allocator, instructions, text);
-    // const elapsed2 = start2.untilNow(init.io, .awake);
-    // std.debug.print("thompson result is: {}. thompson took: {d} \n", .{result2, elapsed2.toNanoseconds()});
+    const start2 = std.Io.Clock.awake.now(init.io);
+    const result2 = try match(allocator, program, text);
+    defer result2.deinit();
+    const elapsed2 = start2.untilNow(init.io, .awake);
+    std.debug.print("result is: {}. took: {d} \n", .{result2.result, elapsed2.toNanoseconds()});
+
+    if (result2.result) {
+        var i: usize = 0;
+        while (i < result2.groups.?.len) : (i += 2) {
+            if (result2.groups.?[i] == std.math.maxInt(u32)) {
+                std.debug.print("group {d}: <no_capture>\n", .{i/2});
+            } else {
+                std.debug.print("group {d}: {d}-{d}\n", .{i/2, result2.groups.?[i], result2.groups.?[i+1]});
+            }
+        }
+    }
 
     // match
     // try raw2postfix(allocator, "(ab|cd)+ef");
@@ -68,7 +77,7 @@ pub fn main(init: std.process.Init) !void {
 const Thread = struct{
     const Self = @This();
     ip: u32,
-    saved: []u32,
+    saved: []u32, // TODO Needs to be u64
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator, ip: u32, input_saved: []const u32) !Self {
@@ -118,8 +127,8 @@ const MemberedThreadSet = struct{
 
     pub fn deinit(self: *Self) void {
         self.allocator.free(self.present);
-        for (self.items) |item| {
-            item.deinit();
+        for (0..self.len) |i| {
+            self.items[i].deinit();
         }
         self.allocator.free(self.items);
     }
@@ -127,12 +136,16 @@ const MemberedThreadSet = struct{
     pub fn clear(self: *Self) void {
         var i: usize = 0;
         while (i < self.len) : (i += 1) {
-            self.present[self.items[i]] = false;
+            self.present[self.items[i].ip] = false;
+        }
+        for (0..self.len) |j| {
+            self.items[j].deinit();
         }
         self.len = 0;
     }
 
     pub fn add(self: *Self, value: Thread) !void {
+        // TODO, replace if exists
         if (value.ip >= self.capacity) {
             return error.MemberedSetValueOutOfRange;
         } else if (self.present[value.ip]) {
@@ -141,7 +154,7 @@ const MemberedThreadSet = struct{
             unreachable;
         }
 
-        self.items[self.len] = value.ip;
+        self.items[self.len] = value;
         self.len += 1;
         self.present[value.ip] = true;
     }
@@ -190,27 +203,43 @@ const Threads = struct{
 const Program = struct{
     instructions: std.ArrayList(Instruction),
     groups_count: u32,
-    // allocator: std.mem.Allocator,
+    // TODO include allocator    allocator: std.mem.Allocator, 
 
     // pub fn deinit() 
+};
+
+const Match = struct{
+    const Self = @This();
+
+    result: bool,
+    groups: ?[]u32 = null,
+    allocator: ?std.mem.Allocator = null,
+
+    pub fn deinit(self: Self) void {
+        if (self.groups) |groups| {
+            self.allocator.?.free(groups);
+        }
+    }
 };
 
 pub fn match(
     allocator: std.mem.Allocator,
     program: Program,
     data: []const u8,
-) !bool {
+) !Match {
+    // TODO improve the ownership model ofo groups in this function.
+
     var threads = try Threads.init(allocator, program.instructions.items.len);
     defer threads.deinit();
 
+    const groups: []u32 = try allocator.alloc(u32, program.groups_count*2);
+    defer allocator.free(groups);
+    @memset(groups, std.math.maxInt(u32)); // This define the default value in all the groups
 
-    var groups: []u32 = try allocator.alloc(u32, program.groups_count);
-    errdefer allocator.free(groups);
-    var thread0 = Thread.init(allocator, 0, groups);
-    groups = .{};
-
-    errdefer thread0.deinit();
-    try threads.current().add(thread0);
+    var thread0: ?Thread = try Thread.init(allocator, 0, groups);
+    errdefer if (thread0) |*ot0| ot0.deinit();
+    try threads.current().add(thread0.?);
+    thread0 = null;
 
     var sp: usize = 0;
     while (sp <= data.len) : (sp += 1) {
@@ -223,13 +252,13 @@ pub fn match(
             switch(instruction.type) {
                 .char => {
                     if (sp < data.len and data[sp] == @as(u8, @intCast(instruction.a.?))) {
-                        const new_thread = try Thread.init(allocator, thread.ip+1, thread.saved);
+                        var new_thread = try Thread.init(allocator, thread.ip+1, thread.saved);
                         errdefer new_thread.deinit();
                         try other.add(new_thread);
                     }
                 },
                 .jump => {
-                    const new_thread = try Thread.init(allocator, instruction.a.?, thread.saved);
+                    var new_thread = try Thread.init(allocator, instruction.a.?, thread.saved);
                     errdefer new_thread.deinit();
                     try current.add(new_thread);
                 },
@@ -240,20 +269,24 @@ pub fn match(
                     new_thread0 = null;
                     // TODO I don't like it too much.
 
-                    const new_thread1 = try Thread.init(allocator, instruction.b.?, thread.saved);
+                    var new_thread1 = try Thread.init(allocator, instruction.b.?, thread.saved);
                     errdefer new_thread1.deinit();
                     try current.add(new_thread1);
                 },
                 .match => {
                     if (sp == data.len) {
-                        // TODO also save at 1
-                        // todo memcpy back grouops
-                        return true;
+                        const result_groups = try allocator.alloc(u32, program.groups_count*2);
+                        @memcpy(result_groups, thread.saved);
+                        return .{
+                            .allocator = allocator,
+                            .groups = result_groups,
+                            .result = true
+                        };
                     }
                 },
                 .save => {
-                    thread.saved[instruction.a.?] = sp;
-                    const new_thread = try Thread.init(allocator, thread.ip+1, thread.saved);
+                    thread.saved[instruction.a.?] = @as(u32, @intCast(sp));
+                    var new_thread = try Thread.init(allocator, thread.ip+1, thread.saved);
                     errdefer new_thread.deinit();
                     try current.add(new_thread);
                 },
@@ -262,7 +295,7 @@ pub fn match(
         current.clear();
         threads.swap();
     }
-    return false;
+    return .{.result = false};
 }
 
 /// Search is looking for a single submatch in a list. In case of several submatches the rules for the one returned
@@ -524,7 +557,7 @@ const StateType = enum(u16) {
     match,
 };
 
-pub fn postfix2nfavm(
+pub fn postfix2nfatree(
     temp_allocator: std.mem.Allocator,
     state_allocator: std.mem.Allocator,
     postfix: []const u16,
@@ -539,7 +572,7 @@ pub fn postfix2nfavm(
     // var nfaindices: std.ArrayList(u32) = .empty;
     // defer nfaindices.deinit(temp_allocator);
     for (postfix) |c| {
-        if (c < 256) {
+        if (c < 256 or c >= GROUP_0) {
             const state = try state_allocator.create(State);
             state.* = .{
                 .c = c,
@@ -554,9 +587,6 @@ pub fn postfix2nfavm(
                 .outs = outs,
             });
             outs = .empty;
-        } else if (c > GROUP_0) {
-            // TODO
-
         } else {
             switch (@as(Operation, @enumFromInt(c))) {
                 .concat => {
@@ -739,7 +769,7 @@ fn postfix2vm(
     var state_arena = std.heap.ArenaAllocator.init(allocator);
     defer state_arena.deinit();
     const state_allocator = state_arena.allocator();
-    const base = try postfix2nfavm(allocator, state_allocator, postfix);
+    const base = try postfix2nfatree(allocator, state_allocator, postfix);
 
     var seen = std.AutoHashMap(*State, u32).init(allocator);
     defer seen.deinit();
@@ -755,6 +785,8 @@ fn postfix2vm(
 
     var output_instructions: std.ArrayList(Instruction) = .empty;
     errdefer output_instructions.deinit(allocator);
+
+    var max_sv: u32 = 0;
 
     while (true) {
         if (seen.get(current_state)) |index| {
@@ -777,8 +809,18 @@ fn postfix2vm(
             const index = std.math.cast(u32, output_instructions.items.len - 1) orelse return error.TooManyIntstructions;
             try seen.put(current_state, index);
             current_state = current_state.out.?;
-        }
-        else {
+        } else if (current_state.c >= GROUP_0) {
+            const sv = current_state.c - GROUP_0;
+            try output_instructions.append(allocator, .{
+                .type = .save,
+                .a = sv,
+                .b = null,
+            });
+            max_sv = if (sv > max_sv) sv else max_sv;
+            const index = std.math.cast(u32, output_instructions.items.len - 1) orelse return error.TooManyIntstructions;
+            try seen.put(current_state, index);
+            current_state = current_state.out.?;
+        } else {
             switch(@as(StateType, @enumFromInt(current_state.c))) {
                 .split => {
                     const split_state = current_state;
@@ -824,7 +866,10 @@ fn postfix2vm(
         }
     }
 
-    return output_instructions;
+    return Program{
+        .instructions = output_instructions,
+        .groups_count = (max_sv + 1) / 2,
+    };
 }
 
 pub fn debugPrintInstructionGroups(
@@ -844,6 +889,18 @@ pub fn debugPrintInstructionGroups(
                 std.debug.print(
                     "char '{c}' ({d})\n",
                     .{ @as(u8, @intCast(value)), value },
+                );
+            },
+
+            .save => {
+                const value = inst.a orelse {
+                    std.debug.print("save <missing operand>\n", .{});
+                    continue;
+                };
+
+                std.debug.print(
+                    "save {d}\n",
+                    .{value},
                 );
             },
 
