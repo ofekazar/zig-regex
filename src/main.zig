@@ -18,7 +18,7 @@ const RegexError = error{
 // TODO add capture groups
 // TODO add lazy operators
 // TODO Build a test suite
-// TODO Add bol/f and eol/f
+// TODO Add bol/f and eol/f. With custom instraction?
 // TODO Add counted repeatitions
 // TODO implement with threads instead of backtracking
 // TODO remove the extra jump in qm
@@ -26,6 +26,7 @@ const RegexError = error{
 
 
 pub fn main(init: std.process.Init) !void {
+    _ = init;
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer {
         const status = gpa.deinit();
@@ -35,22 +36,26 @@ pub fn main(init: std.process.Init) !void {
     }
     const allocator = gpa.allocator();
 
-    const pattern = "a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?aaaaaaaaaaaaaaaaaaaaaaaaa";
-    const text = "aaaaaaaaaaaaaaaaaaaaaaaaa";
+    const pattern = "a(b)|(c)";
+    // const text = "aabb";
     // const pattern = "a+b";
     // const text = "aab";
     std.debug.print("before: {s}\n", .{pattern});
     var postfix = try raw2postfix(allocator, pattern);
     defer postfix.deinit(allocator);
     try debugprintpostfix(allocator, postfix.items);
-    var instructions = try nfatree2instructions(allocator, postfix.items);
-    // try debugPrintInstructionGroups(instructions);
-    defer instructions.deinit(allocator);
 
-    const start2 = std.Io.Clock.awake.now(init.io);
-    const result2 = try match(allocator, instructions, text);
-    const elapsed2 = start2.untilNow(init.io, .awake);
-    std.debug.print("thompson result is: {}. thompson took: {d} \n", .{result2, elapsed2.toNanoseconds()});
+    // var instructions = try postfix2vm(allocator, postfix.items);
+    // // try debugPrintInstructionGroups(instructions);
+    // defer instructions.deinit(allocator);
+
+    // const start2 = std.Io.Clock.awake.now(init.io);
+    // saved = try allocator.alloc(u32, groups_counte*2);
+    // errdefer allocator.free(saved);
+    // const result2 = try match(allocator, instructions, text);
+    // const elapsed2 = start2.untilNow(init.io, .awake);
+    // std.debug.print("thompson result is: {}. thompson took: {d} \n", .{result2, elapsed2.toNanoseconds()});
+
     // match
     // try raw2postfix(allocator, "(ab|cd)+ef");
     // try raw2postfix(allocator, "a?(b|cd)e*");
@@ -60,17 +65,36 @@ pub fn main(init: std.process.Init) !void {
 }
 
 
-// const Thread = struct{
-//     ip: u32 = 0,
-// };
+const Thread = struct{
+    const Self = @This();
+    ip: u32,
+    saved: []u32,
+    allocator: std.mem.Allocator,
 
-const Thread = u32;
+    pub fn init(allocator: std.mem.Allocator, ip: u32, input_saved: []const u32) !Self {
+        const saved = try allocator.alloc(u32, input_saved.len);
+        errdefer allocator.free(saved);
+        @memcpy(saved, input_saved);
 
-const MemberedSet = struct{
+        return .{
+            .ip = ip,
+            .saved = saved,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.allocator.free(self.saved);
+    }
+};
+
+// const Thread = u32;
+
+const MemberedThreadSet = struct{
     const Self = @This();
 
     present: []bool,
-    items: []usize,
+    items: []Thread,
     len: usize,
     capacity: usize,
     allocator: std.mem.Allocator,
@@ -78,7 +102,7 @@ const MemberedSet = struct{
     pub fn init(allocator: std.mem.Allocator, capacity: usize) !Self {
         const present = try allocator.alloc(bool, capacity);
         errdefer allocator.free(present);
-        const items = try allocator.alloc(usize, capacity);
+        const items = try allocator.alloc(Thread, capacity);
         errdefer allocator.free(items);
 
         @memset(present, false);
@@ -94,6 +118,9 @@ const MemberedSet = struct{
 
     pub fn deinit(self: *Self) void {
         self.allocator.free(self.present);
+        for (self.items) |item| {
+            item.deinit();
+        }
         self.allocator.free(self.items);
     }
 
@@ -105,34 +132,34 @@ const MemberedSet = struct{
         self.len = 0;
     }
 
-    pub fn add(self: *Self, value: usize) !void {
-        if (value >= self.capacity) {
+    pub fn add(self: *Self, value: Thread) !void {
+        if (value.ip >= self.capacity) {
             return error.MemberedSetValueOutOfRange;
-        } else if (self.present[value]) {
+        } else if (self.present[value.ip]) {
             return;
         } else if (self.len >= self.capacity) {
             unreachable;
         }
 
-        self.items[self.len] = value;
+        self.items[self.len] = value.ip;
         self.len += 1;
-        self.present[value] = true;
+        self.present[value.ip] = true;
     }
 };
 
 const Threads = struct{
     const Self = @This();
 
-    l1: MemberedSet, // TODO Test a Set.. Probably slower for most cases but should have better scaling
-    l2: MemberedSet,
+    l1: MemberedThreadSet, // TODO Test a Set.. Probably slower for most cases but should have better scaling
+    l2: MemberedThreadSet,
 
     current_l1: bool = true,
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator, capacity: usize) !Self {
-        var l1 = try MemberedSet.init(allocator, capacity);
+        var l1 = try MemberedThreadSet.init(allocator, capacity);
         errdefer l1.deinit();
-        var l2 = try MemberedSet.init(allocator, capacity);
+        var l2 = try MemberedThreadSet.init(allocator, capacity);
         errdefer l2.deinit();
         return .{
             .l1 = l1,
@@ -147,11 +174,11 @@ const Threads = struct{
         self.* = undefined;
     }
 
-    pub fn current(self: *Self) *MemberedSet {
+    pub fn current(self: *Self) *MemberedThreadSet {
         return if (self.current_l1) &self.l1 else &self.l2;
     }
 
-    pub fn other(self: *Self) *MemberedSet {
+    pub fn other(self: *Self) *MemberedThreadSet {
         return if (self.current_l1) &self.l2 else &self.l1;
     }
 
@@ -160,17 +187,109 @@ const Threads = struct{
     }
 };
 
+const Program = struct{
+    instructions: std.ArrayList(Instruction),
+    groups_count: u32,
+    // allocator: std.mem.Allocator,
+
+    // pub fn deinit() 
+};
+
 pub fn match(
+    allocator: std.mem.Allocator,
+    program: Program,
+    data: []const u8,
+) !bool {
+    var threads = try Threads.init(allocator, program.instructions.items.len);
+    defer threads.deinit();
+
+
+    var groups: []u32 = try allocator.alloc(u32, program.groups_count);
+    errdefer allocator.free(groups);
+    var thread0 = Thread.init(allocator, 0, groups);
+    groups = .{};
+
+    errdefer thread0.deinit();
+    try threads.current().add(thread0);
+
+    var sp: usize = 0;
+    while (sp <= data.len) : (sp += 1) {
+        var i: usize = 0;
+        const current = threads.current();
+        const other = threads.other();
+        while (i < current.len) : (i += 1) {
+            const thread = current.items[i];
+            const instruction = program.instructions.items[thread.ip];
+            switch(instruction.type) {
+                .char => {
+                    if (sp < data.len and data[sp] == @as(u8, @intCast(instruction.a.?))) {
+                        const new_thread = try Thread.init(allocator, thread.ip+1, thread.saved);
+                        errdefer new_thread.deinit();
+                        try other.add(new_thread);
+                    }
+                },
+                .jump => {
+                    const new_thread = try Thread.init(allocator, instruction.a.?, thread.saved);
+                    errdefer new_thread.deinit();
+                    try current.add(new_thread);
+                },
+                .split => {
+                    var new_thread0: ?Thread = try Thread.init(allocator, instruction.a.?, thread.saved);
+                    errdefer if (new_thread0) |*nt0| nt0.deinit();
+                    try current.add(new_thread0.?);
+                    new_thread0 = null;
+                    // TODO I don't like it too much.
+
+                    const new_thread1 = try Thread.init(allocator, instruction.b.?, thread.saved);
+                    errdefer new_thread1.deinit();
+                    try current.add(new_thread1);
+                },
+                .match => {
+                    if (sp == data.len) {
+                        // TODO also save at 1
+                        // todo memcpy back grouops
+                        return true;
+                    }
+                },
+                .save => {
+                    thread.saved[instruction.a.?] = sp;
+                    const new_thread = try Thread.init(allocator, thread.ip+1, thread.saved);
+                    errdefer new_thread.deinit();
+                    try current.add(new_thread);
+                },
+            }
+        }
+        current.clear();
+        threads.swap();
+    }
+    return false;
+}
+
+/// Search is looking for a single submatch in a list. In case of several submatches the rules for the one returned
+/// are as followed, ordered by priority:
+/// 1. The match that starts at the leftmost character of the data.
+/// 2. The longest match avaiable.
+///
+/// Example:
+/// data = "text <html> </html> text"
+/// pattern = "<.+>"
+/// result -> "<html></html>"
+///
+/// not "<html>". There is another match at the same leftmost position that is longer.
+/// and not "</html>" not the left most match
+pub fn search(
     allocator: std.mem.Allocator,
     instructions: std.ArrayList(Instruction),
     data: []const u8
 ) !bool {
+    // TODO need to capture full match
+    // Need to print result.
     var threads = try Threads.init(allocator, instructions.items.len);
     defer threads.deinit();
-    try threads.current().add(0);
 
     var sp: usize = 0;
     while (sp <= data.len) : (sp += 1) {
+        try threads.current().add(0);
         var i: usize = 0;
         while (i < threads.current().len) : (i += 1) {
             const ip = threads.current().items[i];
@@ -182,9 +301,7 @@ pub fn match(
                     }
                 },
                 .match => {
-                    if (sp == data.len) {
-                        return true;
-                    }
+                    return true;
                 },
                 else => {
                     try get_next_instruction(threads.current(), instructions.items, ip);
@@ -198,7 +315,7 @@ pub fn match(
 }
 
 fn get_next_instruction(
-    out: *MemberedSet,
+    out: *MemberedThreadSet,
     instructions: []const Instruction,
     ip: usize,
 ) !void {
@@ -226,15 +343,32 @@ const Operation = enum(u16) { // Bigger is higher precedence
     // any, // - will end up as .
 };
 
+const GROUP_0: u16 = 1000;
+
 pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !std.ArrayList(u16) {
+    // TODO change to union instead of magic u16.. Maybe magic u16 is fine when documented because it is most likely
+    // very fast but how fast? Its kinda ugly and prune to bugs. What am I looking for here? 100% performance or 80% and
+    // maintainable?
     var outputqueue: std.ArrayList(u16) = .empty;
     errdefer outputqueue.deinit(allocator);
     try outputqueue.ensureTotalCapacity(allocator, pattern.len * 2);
 
-    var operatorqueue: std.ArrayList(u8) = .empty;
+    var operatorqueue: std.ArrayList(u16) = .empty;
     defer operatorqueue.deinit(allocator);
 
+    // 1000+ groups
+    try outputqueue.append(allocator, GROUP_0);
+
+    // last_end start with false even when the previous item is a group because
+    // this is the full capture group and will be appended to the query result
+    // at the end of the postifix with the arguement .1.
+    // This means that the fragments at the end of the postfix would look like
+    // this before merging:
+    // 0, <result>, <concat>, 1, <concat>
+    // concat 0 to the full result and the concat to this, 1 at the end.
     var last_end: bool = false;
+
+    var group_counter: u16 = 1;
     for (pattern) |c| {
         switch (c) {
             '*' => { // e
@@ -249,52 +383,66 @@ pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !std.Array
                 try outputqueue.append(allocator, @intFromEnum(Operation.plus));
                 last_end = true;
             },
-            '(' => { // s
+            '(' => { // s e
                 if (last_end) {
-                    if (operatorqueue.items.len > 0 and operatorqueue.items[operatorqueue.items.len - 1] == '.') {
-                        try outputqueue.append(allocator, @intFromEnum(Operation.concat));
+                    if (operatorqueue.items.len > 0 and operatorqueue.items[operatorqueue.items.len - 1] == @intFromEnum(Operation.concat)) {
+                        try outputqueue.append(allocator, operatorqueue.items[operatorqueue.items.len - 1]);
                     } else {
-                        try operatorqueue.append(allocator, '.');
+                        try operatorqueue.append(allocator, @intFromEnum(Operation.concat));
                     }
                 }
-                try operatorqueue.append(allocator, '(');
-                last_end = false;
+                try operatorqueue.append(allocator, GROUP_0 + group_counter*2);
+                try outputqueue.append(allocator, GROUP_0 + group_counter*2);
+                last_end = true;
+                group_counter += 1;
             },
             ')' => { // e
-                var found_open = false;
-                while (operatorqueue.pop()) |op| {
-                    switch (op) {
-                        '(' => {
-                            found_open = true;
-                            break;
-                        },
-                        '|' => {
-                            try outputqueue.append(allocator, @intFromEnum(Operation.split));
-                        },
-                        '.' => {
-                            try outputqueue.append(allocator, @intFromEnum(Operation.concat));
-                        },
-                        else => {
-                            return error.InvalidOperator;
-                        },
+                if (last_end) {
+                    if (operatorqueue.items.len > 0 and operatorqueue.items[operatorqueue.items.len - 1] == @intFromEnum(Operation.concat)) {
+                        try outputqueue.append(allocator, operatorqueue.items[operatorqueue.items.len - 1]);
+                    } else {
+                        try operatorqueue.append(allocator, @intFromEnum(Operation.concat));
                     }
                 }
-                if (!found_open) {
+                var found_group_open: u16 = 0;
+                for (0..operatorqueue.items.len) |i| {
+                    const op = operatorqueue.items[operatorqueue.items.len - 1 - i];
+                    if (op >= GROUP_0 and op%2 == 0) {
+                        found_group_open = op;
+                        break;
+                    }
+                }
+                if (found_group_open == 0) {
                     return error.UnmatchedClosingParenthesis;
                 }
+                try outputqueue.append(allocator, found_group_open+1);
+
+                while (operatorqueue.pop()) |op| {
+                    if (op >= GROUP_0) {
+                        found_group_open = op;
+                        break;
+                    }
+
+                    const op_as_enum = @as(Operation, @enumFromInt(op));
+                    if (op_as_enum == Operation.split or op_as_enum == Operation.concat) {
+                        try outputqueue.append(allocator, op);
+                    } else {
+                        return error.InvalidOperator;
+                    }
+                }
+
                 last_end = true;
             },
             '|' => { // s
                 if (last_end) {
-                    if (operatorqueue.items.len > 0 and operatorqueue.items[operatorqueue.items.len - 1] == '.') {
-                        _ = operatorqueue.pop();
-                        try outputqueue.append(allocator, @intFromEnum(Operation.concat));
+                    if (operatorqueue.items.len > 0 and operatorqueue.items[operatorqueue.items.len - 1] == @intFromEnum(Operation.concat)) {
+                        try outputqueue.append(allocator, operatorqueue.pop().?);
                     }
-                    if (operatorqueue.items.len > 0 and operatorqueue.items[operatorqueue.items.len - 1] == '|') {
+                    if (operatorqueue.items.len > 0 and operatorqueue.items[operatorqueue.items.len - 1] == @intFromEnum(Operation.split)) {
                         try outputqueue.append(allocator, @intFromEnum(Operation.split));
                     }
                 }
-                try operatorqueue.append(allocator, '|');
+                try operatorqueue.append(allocator, @intFromEnum(Operation.split));
                 last_end = false;
             },
             // '.' => { // e s
@@ -311,10 +459,10 @@ pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !std.Array
             // },
             else => { // e s
                 if (last_end) {
-                    if (operatorqueue.items.len > 0 and operatorqueue.items[operatorqueue.items.len - 1] == '.') {
-                        try outputqueue.append(allocator, @intFromEnum(Operation.concat));
+                    if (operatorqueue.items.len > 0 and operatorqueue.items[operatorqueue.items.len - 1] == @intFromEnum(Operation.concat)) {
+                        try outputqueue.append(allocator, operatorqueue.items[operatorqueue.items.len - 1]);
                     } else {
-                        try operatorqueue.append(allocator, '.');
+                        try operatorqueue.append(allocator, @intFromEnum(Operation.concat));
                     }
                 }
                 try outputqueue.append(allocator, c);
@@ -324,21 +472,25 @@ pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !std.Array
     }
 
     while (operatorqueue.pop()) |op| {
-        switch (op) {
-            '(' => {
-                return error.UnmatchedOpeningParenthesis;
-            },
-            '|' => {
-                try outputqueue.append(allocator, @intFromEnum(Operation.split));
-            },
-            '.' => {
-                try outputqueue.append(allocator, @intFromEnum(Operation.concat));
-            },
-            else => unreachable,
+        if (op >= GROUP_0 and op%2 == 0) {
+            return error.UnmatchedOpeningParenthesis;
+        }
+
+        const op_as_enum = @as(Operation, @enumFromInt(op));
+        if (op_as_enum == Operation.split or op_as_enum == Operation.concat) {
+            try outputqueue.append(allocator, op);
+        } else {
+            return error.InvalidOperator;
         }
     }
 
+    try outputqueue.append(allocator, @intFromEnum(Operation.concat));
+    try outputqueue.append(allocator, GROUP_0 + 1);
+    try outputqueue.append(allocator, @intFromEnum(Operation.concat));
+
+
     // try debugprintpostfix(allocator, outputqueue.items);
+
     return outputqueue;
 }
 
@@ -347,6 +499,7 @@ const InstuctionType = enum(u8) {
     jump,
     split,
     match,
+    save,
 };
 
 const Instruction = struct {
@@ -401,6 +554,9 @@ pub fn postfix2nfavm(
                 .outs = outs,
             });
             outs = .empty;
+        } else if (c > GROUP_0) {
+            // TODO
+
         } else {
             switch (@as(Operation, @enumFromInt(c))) {
                 .concat => {
@@ -554,10 +710,15 @@ pub fn debugprintpostfix(allocator: std.mem.Allocator, outputqueue: []const u16)
             259 => '*',
             260 => '?',
             261 => '-',
-            else => if (value < 256)
-                @intCast(value)
-            else
-                null,
+            else => blk: {
+                if (value < 256) {
+                    break :blk @intCast(value);
+                } else if (value >= GROUP_0) {
+                    break :blk @intCast(value - GROUP_0 + '0');
+                } else {
+                    break :blk null;
+                }
+            },
         };
 
         if (character) |c| {
@@ -571,10 +732,10 @@ pub fn debugprintpostfix(allocator: std.mem.Allocator, outputqueue: []const u16)
 
 /// This function takes the nfa treelike structure and builds the instruction list
 /// from it.
-fn nfatree2instructions(
+fn postfix2vm(
     allocator: std.mem.Allocator,
     postfix: []const u16,
-) !std.ArrayList(Instruction) {
+) !Program {
     var state_arena = std.heap.ArenaAllocator.init(allocator);
     defer state_arena.deinit();
     const state_allocator = state_arena.allocator();
