@@ -91,7 +91,7 @@ const Thread = struct{
         };
     }
 
-    pub fn deinit(self: *Self) void {
+    pub fn deinit(self: *const Self) void {
         self.allocator.free(self.saved);
     }
 };
@@ -144,6 +144,21 @@ const SparseThreadSet = struct{
         } else if (self.sparse[value.ip] < self.len and self.items[self.sparse[value.ip]].ip == value.ip) {
             self.items[self.sparse[value.ip]].deinit();
             self.items[self.sparse[value.ip]] = value;
+            return;
+        } else if (self.len >= self.capacity) {
+            unreachable;
+        }
+
+        self.items[self.len] = value;
+        self.sparse[value.ip] = @as(u32, @intCast(self.len));
+        self.len += 1;
+    }
+
+    pub fn add(self: *Self, value: Thread) !void {
+        if (value.ip >= self.capacity) {
+            return error.MemberedSetValueOutOfRange;
+        } else if (self.sparse[value.ip] < self.len and self.items[self.sparse[value.ip]].ip == value.ip) {
+            value.deinit();
             return;
         } else if (self.len >= self.capacity) {
             unreachable;
@@ -233,7 +248,7 @@ pub fn match(
 
     var thread0: ?Thread = try Thread.init(allocator, 0, groups);
     errdefer if (thread0) |*ot0| ot0.deinit();
-    try threads.current().replace(thread0.?);
+    try threads.current().add(thread0.?);
     thread0 = null;
 
     var sp: usize = 0;
@@ -249,23 +264,23 @@ pub fn match(
                     if (sp < data.len and data[sp] == @as(u8, @intCast(instruction.a.?))) {
                         var new_thread = try Thread.init(allocator, thread.ip+1, thread.saved);
                         errdefer new_thread.deinit();
-                        try other.replace(new_thread);
+                        try other.add(new_thread);
                     }
                 },
                 .jump => {
                     var new_thread = try Thread.init(allocator, instruction.a.?, thread.saved);
                     errdefer new_thread.deinit();
-                    try current.replace(new_thread);
+                    try current.add(new_thread);
                 },
                 .split => {
                     var new_thread0: ?Thread = try Thread.init(allocator, instruction.a.?, thread.saved);
                     errdefer if (new_thread0) |*nt0| nt0.deinit();
-                    try current.replace(new_thread0.?);
+                    try current.add(new_thread0.?);
                     new_thread0 = null;
 
                     var new_thread1 = try Thread.init(allocator, instruction.b.?, thread.saved);
                     errdefer new_thread1.deinit();
-                    try current.replace(new_thread1);
+                    try current.add(new_thread1);
                 },
                 .match => {
                     if (sp == data.len) {
@@ -316,7 +331,7 @@ pub fn search(
 
     var sp: usize = 0;
     while (sp <= data.len) : (sp += 1) {
-        try threads.current().replace(0);
+        try threads.current().add(0);
         var i: usize = 0;
         while (i < threads.current().len) : (i += 1) {
             const ip = threads.current().items[i];
@@ -324,7 +339,7 @@ pub fn search(
             switch(instruction.type) {
                 .char => {
                     if (sp < data.len and data[sp] == @as(u8, @intCast(instruction.a.?))) {
-                        try threads.other().replace(ip+1);
+                        try threads.other().add(ip+1);
                     }
                 },
                 .match => {
