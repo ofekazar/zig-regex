@@ -9,6 +9,9 @@ const RegexError = error{
     MemberedSetValueOutOfRange,
 };
 
+// TODO add bol eol instructions
+// TODO change compliation to one function called compile
+// TODO Test arena allocator | fixed size allocator for threads
 // TODO in pike vm, aggressively insert split and jump operation to keep priority
 // When a match is found, any lower priority threads should be removed, and result saved in a pointer
 // the higher priority threads should try to keep matching, any new matches should replace the saved pointer.
@@ -47,19 +50,24 @@ pub fn main(init: std.process.Init) !void {
     defer program.instructions.deinit(allocator);
     try debugPrintInstructionGroups(program.instructions);
 
-    const start2 = std.Io.Clock.awake.now(init.io);
-    const result2 = try match(allocator, program, text);
-    defer result2.deinit();
-    const elapsed2 = start2.untilNow(init.io, .awake);
-    std.debug.print("result is: {}. took: {d} \n", .{result2.result, elapsed2.toNanoseconds()});
+    var elapsed: i96 = 0;
+    var result2: ?Match = null;
+    for (0..100) |_| {
+        const start2 = std.Io.Clock.awake.now(init.io);
+        result2 = try match(allocator, program, text);
+        defer if (result2) |res| res.deinit();
+        elapsed += start2.untilNow(init.io, .awake).toNanoseconds();
+    }
+    std.debug.print("result is: {}. took: {d} \n", .{result2.?.result, @divTrunc(elapsed, 100)});
 
-    if (result2.result) {
+    const result = result2.?;
+    if (result.result) {
         var i: usize = 0;
-        while (i < result2.groups.?.len) : (i += 2) {
-            if (result2.groups.?[i] == std.math.maxInt(u32)) {
+        while (i < result.groups.?.len) : (i += 2) {
+            if (result.groups.?[i] == std.math.maxInt(u32)) {
                 std.debug.print("group {d}: <no_capture>\n", .{i/2});
             } else {
-                std.debug.print("group {d}: {d}-{d}\n", .{i/2, result2.groups.?[i], result2.groups.?[i+1]});
+                std.debug.print("group {d}: {d}-{d}\n", .{i/2, result.groups.?[i], result.groups.?[i+1]});
             }
         }
     }
