@@ -1,0 +1,1 @@
+zig build --release=fast && .\zig-out\bin\zig_regex.exe

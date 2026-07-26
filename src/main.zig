@@ -15,7 +15,6 @@ const RegexError = error{
 // when all option are exausted, return the match. This is not a full match implementation. Our full match implementation
 // is already solid.
 
-// TODO add capture groups
 // TODO add lazy operators
 // TODO Build a test suite
 // TODO Add bol/f and eol/f. With custom instraction?
@@ -35,8 +34,8 @@ pub fn main(init: std.process.Init) !void {
     }
     const allocator = gpa.allocator();
 
-    const pattern = "a(b)|(c)";
-    const text = "c";
+    const pattern = "(a+)(a+)";
+    const text = "aaaa";
     // const pattern = "a+b";
     // const text = "aab";
     std.debug.print("before: {s}\n", .{pattern});
@@ -46,7 +45,7 @@ pub fn main(init: std.process.Init) !void {
 
     var program = try postfix2vm(allocator, postfix.items);
     defer program.instructions.deinit(allocator);
-    // try debugPrintInstructionGroups(program.instructions);
+    try debugPrintInstructionGroups(program.instructions);
 
     const start2 = std.Io.Clock.awake.now(init.io);
     const result2 = try match(allocator, program, text);
@@ -97,27 +96,26 @@ const Thread = struct{
     }
 };
 
-// const Thread = u32;
 
-const MemberedThreadSet = struct{
+const SparseThreadSet = struct{
     const Self = @This();
 
-    present: []bool,
+    sparse: []u32,
     items: []Thread,
     len: usize,
     capacity: usize,
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator, capacity: usize) !Self {
-        const present = try allocator.alloc(bool, capacity);
-        errdefer allocator.free(present);
+        const sparse = try allocator.alloc(u32, capacity);
+        errdefer allocator.free(sparse);
         const items = try allocator.alloc(Thread, capacity);
         errdefer allocator.free(items);
 
-        @memset(present, false);
+        @memset(sparse, std.math.maxInt(u32));
 
         return .{
-            .present = present,
+            .sparse = sparse,
             .items = items,
             .len = 0,
             .capacity = capacity,
@@ -126,7 +124,7 @@ const MemberedThreadSet = struct{
     }
 
     pub fn deinit(self: *Self) void {
-        self.allocator.free(self.present);
+        self.allocator.free(self.sparse);
         for (0..self.len) |i| {
             self.items[i].deinit();
         }
@@ -134,45 +132,42 @@ const MemberedThreadSet = struct{
     }
 
     pub fn clear(self: *Self) void {
-        var i: usize = 0;
-        while (i < self.len) : (i += 1) {
-            self.present[self.items[i].ip] = false;
-        }
-        for (0..self.len) |j| {
-            self.items[j].deinit();
+        for (0..self.len) |i| {
+            self.items[i].deinit();
         }
         self.len = 0;
     }
 
-    pub fn add(self: *Self, value: Thread) !void {
-        // TODO, replace if exists
+    pub fn replace(self: *Self, value: Thread) !void {
         if (value.ip >= self.capacity) {
             return error.MemberedSetValueOutOfRange;
-        } else if (self.present[value.ip]) {
+        } else if (self.sparse[value.ip] < self.len and self.items[self.sparse[value.ip]].ip == value.ip) {
+            self.items[self.sparse[value.ip]].deinit();
+            self.items[self.sparse[value.ip]] = value;
             return;
         } else if (self.len >= self.capacity) {
             unreachable;
         }
 
         self.items[self.len] = value;
+        self.sparse[value.ip] = @as(u32, @intCast(self.len));
         self.len += 1;
-        self.present[value.ip] = true;
     }
 };
 
 const Threads = struct{
     const Self = @This();
 
-    l1: MemberedThreadSet, // TODO Test a Set.. Probably slower for most cases but should have better scaling
-    l2: MemberedThreadSet,
+    l1: SparseThreadSet, // TODO Test a Set.. Probably slower for most cases but should have better scaling
+    l2: SparseThreadSet,
 
     current_l1: bool = true,
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator, capacity: usize) !Self {
-        var l1 = try MemberedThreadSet.init(allocator, capacity);
+        var l1 = try SparseThreadSet.init(allocator, capacity);
         errdefer l1.deinit();
-        var l2 = try MemberedThreadSet.init(allocator, capacity);
+        var l2 = try SparseThreadSet.init(allocator, capacity);
         errdefer l2.deinit();
         return .{
             .l1 = l1,
@@ -187,11 +182,11 @@ const Threads = struct{
         self.* = undefined;
     }
 
-    pub fn current(self: *Self) *MemberedThreadSet {
+    pub fn current(self: *Self) *SparseThreadSet {
         return if (self.current_l1) &self.l1 else &self.l2;
     }
 
-    pub fn other(self: *Self) *MemberedThreadSet {
+    pub fn other(self: *Self) *SparseThreadSet {
         return if (self.current_l1) &self.l2 else &self.l1;
     }
 
@@ -238,7 +233,7 @@ pub fn match(
 
     var thread0: ?Thread = try Thread.init(allocator, 0, groups);
     errdefer if (thread0) |*ot0| ot0.deinit();
-    try threads.current().add(thread0.?);
+    try threads.current().replace(thread0.?);
     thread0 = null;
 
     var sp: usize = 0;
@@ -254,24 +249,23 @@ pub fn match(
                     if (sp < data.len and data[sp] == @as(u8, @intCast(instruction.a.?))) {
                         var new_thread = try Thread.init(allocator, thread.ip+1, thread.saved);
                         errdefer new_thread.deinit();
-                        try other.add(new_thread);
+                        try other.replace(new_thread);
                     }
                 },
                 .jump => {
                     var new_thread = try Thread.init(allocator, instruction.a.?, thread.saved);
                     errdefer new_thread.deinit();
-                    try current.add(new_thread);
+                    try current.replace(new_thread);
                 },
                 .split => {
                     var new_thread0: ?Thread = try Thread.init(allocator, instruction.a.?, thread.saved);
                     errdefer if (new_thread0) |*nt0| nt0.deinit();
-                    try current.add(new_thread0.?);
+                    try current.replace(new_thread0.?);
                     new_thread0 = null;
-                    // TODO I don't like it too much.
 
                     var new_thread1 = try Thread.init(allocator, instruction.b.?, thread.saved);
                     errdefer new_thread1.deinit();
-                    try current.add(new_thread1);
+                    try current.replace(new_thread1);
                 },
                 .match => {
                     if (sp == data.len) {
@@ -288,7 +282,7 @@ pub fn match(
                     thread.saved[instruction.a.?] = @as(u32, @intCast(sp));
                     var new_thread = try Thread.init(allocator, thread.ip+1, thread.saved);
                     errdefer new_thread.deinit();
-                    try current.add(new_thread);
+                    try current.replace(new_thread);
                 },
             }
         }
@@ -322,7 +316,7 @@ pub fn search(
 
     var sp: usize = 0;
     while (sp <= data.len) : (sp += 1) {
-        try threads.current().add(0);
+        try threads.current().replace(0);
         var i: usize = 0;
         while (i < threads.current().len) : (i += 1) {
             const ip = threads.current().items[i];
@@ -330,7 +324,7 @@ pub fn search(
             switch(instruction.type) {
                 .char => {
                     if (sp < data.len and data[sp] == @as(u8, @intCast(instruction.a.?))) {
-                        try threads.other().add(ip+1);
+                        try threads.other().replace(ip+1);
                     }
                 },
                 .match => {
@@ -348,7 +342,7 @@ pub fn search(
 }
 
 fn get_next_instruction(
-    out: *MemberedThreadSet,
+    out: *SparseThreadSet,
     instructions: []const Instruction,
     ip: usize,
 ) !void {
@@ -362,7 +356,7 @@ fn get_next_instruction(
             try get_next_instruction(out, instructions, inst.a.?);
         },
         else => {
-            try out.add(ip);
+            try out.replace(ip);
         },
     }
 }
