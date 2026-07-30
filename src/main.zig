@@ -37,8 +37,8 @@ pub fn main(init: std.process.Init) !void {
     }
     const allocator = gpa.allocator();
 
-    const pattern = "(a+)(a+)";
-    const text = "aaaa";
+    const pattern = "(a)|(b)";
+    const text = "ab";
     // const pattern = "a+b";
     // const text = "aab";
     std.debug.print("before: {s}\n", .{pattern});
@@ -64,6 +64,7 @@ pub fn main(init: std.process.Init) !void {
     if (result.result) {
         var i: usize = 0;
         while (i < result.groups.?.len) : (i += 2) {
+            std.debug.print("he {d}", .{result.groups.?[i]});
             if (result.groups.?[i] == std.math.maxInt(u32)) {
                 std.debug.print("group {d}: <no_capture>\n", .{i/2});
             } else {
@@ -245,8 +246,6 @@ pub fn match(
     program: Program,
     data: []const u8,
 ) !Match {
-    // TODO improve the ownership model ofo groups in this function.
-
     var threads = try Threads.init(allocator, program.instructions.items.len);
     defer threads.deinit();
 
@@ -399,15 +398,18 @@ pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !std.Array
     // TODO change to union instead of magic u16.. Maybe magic u16 is fine when documented because it is most likely
     // very fast but how fast? Its kinda ugly and prune to bugs. What am I looking for here? 100% performance or 80% and
     // maintainable?
+    const extended_pattern = try std.fmt.allocPrint(allocator, "({s})", .{pattern});
+    defer allocator.free(extended_pattern);
+
     var outputqueue: std.ArrayList(u16) = .empty;
     errdefer outputqueue.deinit(allocator);
-    try outputqueue.ensureTotalCapacity(allocator, pattern.len * 2);
+    try outputqueue.ensureTotalCapacity(allocator, extended_pattern.len * 2);
 
     var operatorqueue: std.ArrayList(u16) = .empty;
     defer operatorqueue.deinit(allocator);
 
     // 1000+ groups
-    try outputqueue.append(allocator, GROUP_0);
+    // try outputqueue.append(allocator, GROUP_0);
 
     // last_end start with false even when the previous item is a group because
     // this is the full capture group and will be appended to the query result
@@ -418,8 +420,8 @@ pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !std.Array
     // concat 0 to the full result and the concat to this, 1 at the end.
     var last_end: bool = false;
 
-    var group_counter: u16 = 1;
-    for (pattern) |c| {
+    var group_counter: u16 = 0;
+    for (extended_pattern) |c| {
         switch (c) {
             '*' => { // e
                 try outputqueue.append(allocator, @intFromEnum(Operation.star));
@@ -433,7 +435,8 @@ pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !std.Array
                 try outputqueue.append(allocator, @intFromEnum(Operation.plus));
                 last_end = true;
             },
-            '(' => { // s e
+            '(' => { // s
+                try outputqueue.append(allocator, GROUP_0 + group_counter*2);
                 if (last_end) {
                     if (operatorqueue.items.len > 0 and operatorqueue.items[operatorqueue.items.len - 1] == @intFromEnum(Operation.concat)) {
                         try outputqueue.append(allocator, operatorqueue.items[operatorqueue.items.len - 1]);
@@ -442,31 +445,11 @@ pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !std.Array
                     }
                 }
                 try operatorqueue.append(allocator, GROUP_0 + group_counter*2);
-                try outputqueue.append(allocator, GROUP_0 + group_counter*2);
-                last_end = true;
+                last_end = false;
                 group_counter += 1;
             },
             ')' => { // e
-                if (last_end) {
-                    if (operatorqueue.items.len > 0 and operatorqueue.items[operatorqueue.items.len - 1] == @intFromEnum(Operation.concat)) {
-                        try outputqueue.append(allocator, operatorqueue.items[operatorqueue.items.len - 1]);
-                    } else {
-                        try operatorqueue.append(allocator, @intFromEnum(Operation.concat));
-                    }
-                }
                 var found_group_open: u16 = 0;
-                for (0..operatorqueue.items.len) |i| {
-                    const op = operatorqueue.items[operatorqueue.items.len - 1 - i];
-                    if (op >= GROUP_0 and op%2 == 0) {
-                        found_group_open = op;
-                        break;
-                    }
-                }
-                if (found_group_open == 0) {
-                    return error.UnmatchedClosingParenthesis;
-                }
-                try outputqueue.append(allocator, found_group_open+1);
-
                 while (operatorqueue.pop()) |op| {
                     if (op >= GROUP_0) {
                         found_group_open = op;
@@ -480,6 +463,19 @@ pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !std.Array
                         return error.InvalidOperator;
                     }
                 }
+
+                if (found_group_open == 0) {
+                    return error.UnmatchedClosingParenthesis;
+                }
+
+                if (operatorqueue.items.len > 0 and operatorqueue.items[operatorqueue.items.len - 1] == @intFromEnum(Operation.concat)) {
+                    try outputqueue.append(allocator, operatorqueue.items[operatorqueue.items.len - 1]);
+                } else {
+                    try operatorqueue.append(allocator, @intFromEnum(Operation.concat));
+                }
+
+                try outputqueue.append(allocator, found_group_open+1);
+                try outputqueue.append(allocator, @intFromEnum(Operation.concat));
 
                 last_end = true;
             },
@@ -534,9 +530,9 @@ pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !std.Array
         }
     }
 
-    try outputqueue.append(allocator, @intFromEnum(Operation.concat));
-    try outputqueue.append(allocator, GROUP_0 + 1);
-    try outputqueue.append(allocator, @intFromEnum(Operation.concat));
+    // try outputqueue.append(allocator, @intFromEnum(Operation.concat));
+    // try outputqueue.append(allocator, GROUP_0 + 1);
+    // try outputqueue.append(allocator, @intFromEnum(Operation.concat));
 
 
     // try debugprintpostfix(allocator, outputqueue.items);
@@ -550,6 +546,9 @@ const InstuctionType = enum(u8) {
     split,
     match,
     save,
+    // any,
+    // bol,
+    // eol,
 };
 
 const Instruction = struct {
