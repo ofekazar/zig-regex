@@ -9,8 +9,14 @@ const RegexError = error{
     MemberedSetValueOutOfRange,
 };
 
-// TODO add bol eol instructions
+// TODO Minimize code. Compilation is too complicated with repeating code.
+// Can probably create a new compiler that compiles directly to vm from the postfix.
+// Postfix can probably be much simpler.
+// Can probably merge the postfix function and the vm function to one and build the vm in one continues stream.
+
 // TODO change compliation to one function called compile
+// TODO add bol eol instructions
+
 // TODO Test arena allocator | fixed size allocator for threads
 // TODO in pike vm, aggressively insert split and jump operation to keep priority
 // When a match is found, any lower priority threads should be removed, and result saved in a pointer
@@ -26,7 +32,6 @@ const RegexError = error{
 // TODO remove the extra jump in qm
 // TODO remove tree stracture step, optimize compiler
 
-
 pub fn main(init: std.process.Init) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer {
@@ -37,7 +42,7 @@ pub fn main(init: std.process.Init) !void {
     }
     const allocator = gpa.allocator();
 
-    const pattern = "(a)|(b)";
+    const pattern = "((a)|(b)).";
     const text = "ab";
     // const pattern = "a+b";
     // const text = "aab";
@@ -52,23 +57,21 @@ pub fn main(init: std.process.Init) !void {
 
     var elapsed: i96 = 0;
     var result2: ?Match = null;
-    for (0..100) |_| {
-        const start2 = std.Io.Clock.awake.now(init.io);
-        result2 = try match(allocator, program, text);
-        defer if (result2) |res| res.deinit();
-        elapsed += start2.untilNow(init.io, .awake).toNanoseconds();
-    }
-    std.debug.print("result is: {}. took: {d} \n", .{result2.?.result, @divTrunc(elapsed, 100)});
+    const start2 = std.Io.Clock.awake.now(init.io);
+    result2 = try match(allocator, program, text);
+    defer if (result2) |res| res.deinit();
+    elapsed += start2.untilNow(init.io, .awake).toNanoseconds();
+
+    std.debug.print("result is: {}. took: {d} \n", .{ result2.?.result, @divTrunc(elapsed, 1) });
 
     const result = result2.?;
     if (result.result) {
         var i: usize = 0;
         while (i < result.groups.?.len) : (i += 2) {
-            std.debug.print("he {d}", .{result.groups.?[i]});
             if (result.groups.?[i] == std.math.maxInt(u32)) {
-                std.debug.print("group {d}: <no_capture>\n", .{i/2});
+                std.debug.print("group {d}: <no_capture>\n", .{i / 2});
             } else {
-                std.debug.print("group {d}: {d}-{d}\n", .{i/2, result.groups.?[i], result.groups.?[i+1]});
+                std.debug.print("group {d}: {d}-{d}\n", .{ i / 2, result.groups.?[i], result.groups.?[i + 1] });
             }
         }
     }
@@ -81,8 +84,7 @@ pub fn main(init: std.process.Init) !void {
 
 }
 
-
-const Thread = struct{
+const Thread = struct {
     const Self = @This();
     ip: u32,
     saved: []u32, // TODO Needs to be u64
@@ -105,8 +107,7 @@ const Thread = struct{
     }
 };
 
-
-const SparseThreadSet = struct{
+const SparseThreadSet = struct {
     const Self = @This();
 
     sparse: []u32,
@@ -179,7 +180,7 @@ const SparseThreadSet = struct{
     }
 };
 
-const Threads = struct{
+const Threads = struct {
     const Self = @This();
 
     l1: SparseThreadSet, // TODO Test a Set.. Probably slower for most cases but should have better scaling
@@ -219,15 +220,15 @@ const Threads = struct{
     }
 };
 
-const Program = struct{
+const Program = struct {
     instructions: std.ArrayList(Instruction),
     groups_count: u32,
-    // TODO include allocator    allocator: std.mem.Allocator, 
+    // TODO include allocator    allocator: std.mem.Allocator,
 
-    // pub fn deinit() 
+    // pub fn deinit()
 };
 
-const Match = struct{
+const Match = struct {
     const Self = @This();
 
     result: bool,
@@ -249,7 +250,7 @@ pub fn match(
     var threads = try Threads.init(allocator, program.instructions.items.len);
     defer threads.deinit();
 
-    const groups: []u32 = try allocator.alloc(u32, program.groups_count*2);
+    const groups: []u32 = try allocator.alloc(u32, program.groups_count * 2);
     defer allocator.free(groups);
     @memset(groups, std.math.maxInt(u32)); // This define the default value in all the groups
 
@@ -266,10 +267,17 @@ pub fn match(
         while (i < current.len) : (i += 1) {
             const thread = current.items[i];
             const instruction = program.instructions.items[thread.ip];
-            switch(instruction.type) {
+            switch (instruction.type) {
                 .char => {
                     if (sp < data.len and data[sp] == @as(u8, @intCast(instruction.a.?))) {
-                        var new_thread = try Thread.init(allocator, thread.ip+1, thread.saved);
+                        var new_thread = try Thread.init(allocator, thread.ip + 1, thread.saved);
+                        errdefer new_thread.deinit();
+                        try other.add(new_thread);
+                    }
+                },
+                .any => {
+                    if (sp < data.len) {
+                        var new_thread = try Thread.init(allocator, thread.ip + 1, thread.saved);
                         errdefer new_thread.deinit();
                         try other.add(new_thread);
                     }
@@ -291,18 +299,14 @@ pub fn match(
                 },
                 .match => {
                     if (sp == data.len) {
-                        const result_groups = try allocator.alloc(u32, program.groups_count*2);
+                        const result_groups = try allocator.alloc(u32, program.groups_count * 2);
                         @memcpy(result_groups, thread.saved);
-                        return .{
-                            .allocator = allocator,
-                            .groups = result_groups,
-                            .result = true
-                        };
+                        return .{ .allocator = allocator, .groups = result_groups, .result = true };
                     }
                 },
                 .save => {
                     thread.saved[instruction.a.?] = @as(u32, @intCast(sp));
-                    var new_thread = try Thread.init(allocator, thread.ip+1, thread.saved);
+                    var new_thread = try Thread.init(allocator, thread.ip + 1, thread.saved);
                     errdefer new_thread.deinit();
                     try current.replace(new_thread);
                 },
@@ -311,7 +315,7 @@ pub fn match(
         current.clear();
         threads.swap();
     }
-    return .{.result = false};
+    return .{ .result = false };
 }
 
 /// Search is looking for a single submatch in a list. In case of several submatches the rules for the one returned
@@ -326,11 +330,7 @@ pub fn match(
 ///
 /// not "<html>". There is another match at the same leftmost position that is longer.
 /// and not "</html>" not the left most match
-pub fn search(
-    allocator: std.mem.Allocator,
-    instructions: std.ArrayList(Instruction),
-    data: []const u8
-) !bool {
+pub fn search(allocator: std.mem.Allocator, instructions: std.ArrayList(Instruction), data: []const u8) !bool {
     // TODO need to capture full match
     // Need to print result.
     var threads = try Threads.init(allocator, instructions.items.len);
@@ -343,10 +343,10 @@ pub fn search(
         while (i < threads.current().len) : (i += 1) {
             const ip = threads.current().items[i];
             const instruction = instructions.items[ip];
-            switch(instruction.type) {
+            switch (instruction.type) {
                 .char => {
                     if (sp < data.len and data[sp] == @as(u8, @intCast(instruction.a.?))) {
-                        try threads.other().add(ip+1);
+                        try threads.other().add(ip + 1);
                     }
                 },
                 .match => {
@@ -354,7 +354,7 @@ pub fn search(
                 },
                 else => {
                     try get_next_instruction(threads.current(), instructions.items, ip);
-                }
+                },
             }
         }
         threads.current().clear();
@@ -369,7 +369,7 @@ fn get_next_instruction(
     ip: usize,
 ) !void {
     const inst = instructions[ip];
-    switch(inst.type) {
+    switch (inst.type) {
         .split => {
             try get_next_instruction(out, instructions, inst.a.?);
             try get_next_instruction(out, instructions, inst.b.?);
@@ -389,7 +389,7 @@ const Operation = enum(u16) { // Bigger is higher precedence
     plus, // +
     star, // *
     qm, // ?
-    // any, // - will end up as .
+    any, // .
 };
 
 const GROUP_0: u16 = 1000;
@@ -436,7 +436,7 @@ pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !std.Array
                 last_end = true;
             },
             '(' => { // s
-                try outputqueue.append(allocator, GROUP_0 + group_counter*2);
+                try outputqueue.append(allocator, GROUP_0 + group_counter * 2);
                 if (last_end) {
                     if (operatorqueue.items.len > 0 and operatorqueue.items[operatorqueue.items.len - 1] == @intFromEnum(Operation.concat)) {
                         try outputqueue.append(allocator, operatorqueue.items[operatorqueue.items.len - 1]);
@@ -444,7 +444,7 @@ pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !std.Array
                         try operatorqueue.append(allocator, @intFromEnum(Operation.concat));
                     }
                 }
-                try operatorqueue.append(allocator, GROUP_0 + group_counter*2);
+                try operatorqueue.append(allocator, GROUP_0 + group_counter * 2);
                 last_end = false;
                 group_counter += 1;
             },
@@ -474,7 +474,7 @@ pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !std.Array
                     try operatorqueue.append(allocator, @intFromEnum(Operation.concat));
                 }
 
-                try outputqueue.append(allocator, found_group_open+1);
+                try outputqueue.append(allocator, found_group_open + 1);
                 try outputqueue.append(allocator, @intFromEnum(Operation.concat));
 
                 last_end = true;
@@ -491,18 +491,17 @@ pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !std.Array
                 try operatorqueue.append(allocator, @intFromEnum(Operation.split));
                 last_end = false;
             },
-            // '.' => { // e s
-            //     if (last_end) {
-            //         if (operatorqueue.items.len > 0 and operatorqueue.items[operatorqueue.items.len - 1] == '.') {
-            //             try outputqueue.append(allocator, @intFromEnum(Operation.concat));
-            //         } else {
-            //             try operatorqueue.append(allocator, '.');
-            //         }
-            //     }
-
-            //     try outputqueue.append(allocator, '-');
-            //     last_end = true;
-            // },
+            '.' => {
+                if (last_end) {
+                    if (operatorqueue.items.len > 0 and operatorqueue.items[operatorqueue.items.len - 1] == @intFromEnum(Operation.concat)) {
+                        try outputqueue.append(allocator, operatorqueue.items[operatorqueue.items.len - 1]);
+                    } else {
+                        try operatorqueue.append(allocator, @intFromEnum(Operation.concat));
+                    }
+                }
+                try outputqueue.append(allocator, @intFromEnum(Operation.any));
+                last_end = true;
+            },
             else => { // e s
                 if (last_end) {
                     if (operatorqueue.items.len > 0 and operatorqueue.items[operatorqueue.items.len - 1] == @intFromEnum(Operation.concat)) {
@@ -518,7 +517,7 @@ pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !std.Array
     }
 
     while (operatorqueue.pop()) |op| {
-        if (op >= GROUP_0 and op%2 == 0) {
+        if (op >= GROUP_0 and op % 2 == 0) {
             return error.UnmatchedOpeningParenthesis;
         }
 
@@ -534,7 +533,6 @@ pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !std.Array
     // try outputqueue.append(allocator, GROUP_0 + 1);
     // try outputqueue.append(allocator, @intFromEnum(Operation.concat));
 
-
     // try debugprintpostfix(allocator, outputqueue.items);
 
     return outputqueue;
@@ -546,7 +544,7 @@ const InstuctionType = enum(u8) {
     split,
     match,
     save,
-    // any,
+    any,
     // bol,
     // eol,
 };
@@ -571,6 +569,7 @@ const Fragment = struct {
 const StateType = enum(u16) {
     split = 256,
     match,
+    any,
 };
 
 pub fn postfix2nfatree(
@@ -605,6 +604,22 @@ pub fn postfix2nfatree(
             outs = .empty;
         } else {
             switch (@as(Operation, @enumFromInt(c))) {
+                .any => {
+                    const state = try state_allocator.create(State);
+                    state.* = .{
+                        .c = @intFromEnum(StateType.any),
+                        .out = null,
+                        .out1 = null,
+                    };
+                    var outs: std.ArrayList(*?*State) = .empty;
+                    errdefer outs.deinit(temp_allocator);
+                    try outs.append(temp_allocator, &state.out);
+                    try fragments.append(temp_allocator, Fragment{
+                        .start = state,
+                        .outs = outs,
+                    });
+                    outs = .empty;
+                },
                 .concat => {
                     var b = fragments.pop() orelse return error.InvalidPostfix;
                     errdefer b.outs.deinit(temp_allocator);
@@ -716,9 +731,6 @@ pub fn postfix2nfatree(
 
                     outs = .empty;
                 },
-                // .any => {
-
-                // },
             }
         }
     }
@@ -750,12 +762,12 @@ pub fn debugprintpostfix(allocator: std.mem.Allocator, outputqueue: []const u16)
 
     for (outputqueue) |value| {
         const character: ?u8 = switch (value) {
-            256 => '.',
+            256 => '-',
             257 => '|',
             258 => '+',
             259 => '*',
             260 => '?',
-            261 => '-',
+            261 => '.',
             else => blk: {
                 if (value < 256) {
                     break :blk @intCast(value);
@@ -774,7 +786,6 @@ pub fn debugprintpostfix(allocator: std.mem.Allocator, outputqueue: []const u16)
 
     std.debug.print("{s}\n", .{printable.items});
 }
-
 
 /// This function takes the nfa treelike structure and builds the instruction list
 /// from it.
@@ -815,8 +826,7 @@ fn postfix2vm(
             current_state = bp.state;
             output_instructions.items[bp.split_index].b =
                 std.math.cast(u32, output_instructions.items.len) orelse return error.TooManyIntstructions;
-        }
-        else if (current_state.c < 256) {
+        } else if (current_state.c < 256) {
             try output_instructions.append(allocator, .{
                 .type = .char,
                 .a = current_state.c,
@@ -837,7 +847,17 @@ fn postfix2vm(
             try seen.put(current_state, index);
             current_state = current_state.out.?;
         } else {
-            switch(@as(StateType, @enumFromInt(current_state.c))) {
+            switch (@as(StateType, @enumFromInt(current_state.c))) {
+                .any => {
+                    try output_instructions.append(allocator, .{
+                        .type = .any,
+                        .a = null,
+                        .b = null,
+                    });
+                    const index = std.math.cast(u32, output_instructions.items.len - 1) orelse return error.TooManyIntstructions;
+                    try seen.put(current_state, index);
+                    current_state = current_state.out.?;
+                },
                 .split => {
                     const split_state = current_state;
                     var a: u32 = 0;
@@ -847,10 +867,7 @@ fn postfix2vm(
                         a = out_state_index;
                         b = std.math.cast(u32, output_instructions.items.len + 1) orelse return error.TooManyIntstructions;
                     } else {
-                        try backprop.append(allocator, .{
-                            .split_index = output_instructions.items.len,
-                            .state = current_state.out1.?
-                        });
+                        try backprop.append(allocator, .{ .split_index = output_instructions.items.len, .state = current_state.out1.? });
                         a = std.math.cast(u32, output_instructions.items.len + 1) orelse return error.TooManyIntstructions;
                         b = 0;
                         current_state = current_state.out.?;
@@ -877,7 +894,7 @@ fn postfix2vm(
                     current_state = bp.state;
                     output_instructions.items[bp.split_index].b =
                         std.math.cast(u32, output_instructions.items.len) orelse return error.TooManyIntstructions;
-                }
+                },
             }
         }
     }
@@ -891,7 +908,6 @@ fn postfix2vm(
 pub fn debugPrintInstructionGroups(
     node: std.ArrayList(Instruction),
 ) !void {
-
     for (node.items, 0..) |inst, i| {
         std.debug.print("  {d}: ", .{i});
 
@@ -941,6 +957,10 @@ pub fn debugPrintInstructionGroups(
 
             .match => {
                 std.debug.print("match\n", .{});
+            },
+
+            .any => {
+                std.debug.print("any\n", .{});
             },
         }
     }
