@@ -13,6 +13,7 @@ const RegexError = error{
 
 // ---- General todos to check at a later time ----
 // TODO Test memory allocation improvements effects on speed.
+// Also try to reduce the amount of allocations for save groups.
 
 // ---- In order todos.
 // TODO fix group. Currently groups are not collected early. Not sure how to explain this so here is an example.
@@ -92,23 +93,15 @@ pub fn main(init: std.process.Init) !void {
 const Thread = struct {
     const Self = @This();
     ip: u32,
-    saved: []u32, // TODO Needs to be u64
+    saved: []u32, // TODO needs to be 
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator, ip: u32, input_saved: []const u32) !Self {
-        const saved = try allocator.alloc(u32, input_saved.len);
-        errdefer allocator.free(saved);
-        @memcpy(saved, input_saved);
-
+    pub fn init(allocator: std.mem.Allocator, ip: u32, saved: []u32) !Self {
         return .{
             .ip = ip,
-            .saved = saved,
+            .saved = saved, //saved is not owned by the thread
             .allocator = allocator,
         };
-    }
-
-    pub fn deinit(self: *const Self) void {
-        self.allocator.free(self.saved);
     }
 };
 
@@ -140,16 +133,10 @@ const SparseThreadSet = struct {
 
     pub fn deinit(self: *Self) void {
         self.allocator.free(self.sparse);
-        for (0..self.len) |i| {
-            self.items[i].deinit();
-        }
         self.allocator.free(self.items);
     }
 
     pub fn clear(self: *Self) void {
-        for (0..self.len) |i| {
-            self.items[i].deinit();
-        }
         self.len = 0;
     }
 
@@ -157,7 +144,6 @@ const SparseThreadSet = struct {
         if (value.ip >= self.capacity) {
             return error.MemberedSetValueOutOfRange;
         } else if (self.sparse[value.ip] < self.len and self.items[self.sparse[value.ip]].ip == value.ip) {
-            self.items[self.sparse[value.ip]].deinit();
             self.items[self.sparse[value.ip]] = value;
             return;
         } else if (self.len >= self.capacity) {
@@ -173,7 +159,6 @@ const SparseThreadSet = struct {
         if (value.ip >= self.capacity) {
             return error.MemberedSetValueOutOfRange;
         } else if (self.sparse[value.ip] < self.len and self.items[self.sparse[value.ip]].ip == value.ip) {
-            value.deinit();
             return;
         } else if (self.len >= self.capacity) {
             unreachable;
@@ -255,52 +240,40 @@ pub fn match(
     var threads = try Threads.init(allocator, program.instructions.items.len);
     defer threads.deinit();
 
-    const groups: []u32 = try allocator.alloc(u32, program.groups_count * 2);
-    defer allocator.free(groups);
+    var arena_groups = std.heap.ArenaAllocator.init(allocator);
+    defer arena_groups.deinit();
+    var groups_allocator = arena_groups.allocator();
+
+
+    const groups: []u32 = try groups_allocator.alloc(u32, program.groups_count * 2);
     @memset(groups, std.math.maxInt(u32)); // This define the default value in all the groups
 
-    var thread0: ?Thread = try Thread.init(allocator, 0, groups);
-    errdefer if (thread0) |*ot0| ot0.deinit();
-    try threads.current().add(thread0.?);
-    thread0 = null;
+    const thread0: Thread = try Thread.init(allocator, 0, groups);
+    try threads.current().add(thread0);
 
     var sp: usize = 0;
     while (sp <= data.len) : (sp += 1) {
         var i: usize = 0;
         const current = threads.current();
         const other = threads.other();
+        std.debug.print("{{", .{});
+        for (0..current.len) |ii| {
+            std.debug.print(" {d} ", .{current.items[ii].ip});
+        }
+        std.debug.print("}}\n", .{});
         while (i < current.len) : (i += 1) {
             const thread = current.items[i];
             const instruction = program.instructions.items[thread.ip];
             switch (instruction.type) {
                 .char => {
                     if (sp < data.len and data[sp] == @as(u8, @intCast(instruction.a.?))) {
-                        var new_thread = try Thread.init(allocator, thread.ip + 1, thread.saved);
-                        errdefer new_thread.deinit();
-                        try other.add(new_thread);
+                        try get_next_instruction(groups_allocator, other, program.instructions.items, thread.ip + 1, sp, thread.saved);
                     }
                 },
                 .any => {
                     if (sp < data.len) {
-                        var new_thread = try Thread.init(allocator, thread.ip + 1, thread.saved);
-                        errdefer new_thread.deinit();
-                        try other.add(new_thread);
+                        try get_next_instruction(groups_allocator, other, program.instructions.items, thread.ip + 1, sp, thread.saved);
                     }
-                },
-                .jump => {
-                    var new_thread = try Thread.init(allocator, @as(u32, @intCast(@as(i32, @intCast(thread.ip)) + instruction.a.?)), thread.saved);
-                    errdefer new_thread.deinit();
-                    try current.add(new_thread);
-                },
-                .split => {
-                    var new_thread0: ?Thread = try Thread.init(allocator, @as(u32, @intCast(@as(i32, @intCast(thread.ip)) + instruction.a.?)), thread.saved);
-                    errdefer if (new_thread0) |*nt0| nt0.deinit();
-                    try current.add(new_thread0.?);
-                    new_thread0 = null;
-
-                    var new_thread1 = try Thread.init(allocator, @as(u32, @intCast(@as(i32, @intCast(thread.ip)) + instruction.b.?)), thread.saved);
-                    errdefer new_thread1.deinit();
-                    try current.add(new_thread1);
                 },
                 .match => {
                     if (sp == data.len) {
@@ -309,12 +282,9 @@ pub fn match(
                         return .{ .allocator = allocator, .groups = result_groups, .result = true };
                     }
                 },
-                .save => {
-                    thread.saved[@as(u32, @intCast(instruction.a.?))] = @as(u32, @intCast(sp));
-                    var new_thread = try Thread.init(allocator, thread.ip + 1, thread.saved);
-                    errdefer new_thread.deinit();
-                    try current.replace(new_thread);
-                },
+                else => {
+                    try get_next_instruction(groups_allocator, other, program.instructions.items, thread.ip, sp, thread.saved);
+                }
             }
         }
         current.clear();
@@ -323,67 +293,38 @@ pub fn match(
     return .{ .result = false };
 }
 
-/// Search is looking for a single submatch in a list. In case of several submatches the rules for the one returned
-/// are as followed, ordered by priority:
-/// 1. The match that starts at the leftmost character of the data.
-/// 2. The longest match avaiable.
-///
-/// Example:
-/// data = "text <html> </html> text"
-/// pattern = "<.+>"
-/// result -> "<html></html>"
-///
-/// not "<html>". There is another match at the same leftmost position that is longer.
-/// and not "</html>" not the left most match
-pub fn search(allocator: std.mem.Allocator, instructions: std.ArrayList(Instruction), data: []const u8) !bool {
-    // TODO need to capture full match
-    // Need to print result.
-    var threads = try Threads.init(allocator, instructions.items.len);
-    defer threads.deinit();
-
-    var sp: usize = 0;
-    while (sp <= data.len) : (sp += 1) {
-        try threads.current().add(0);
-        var i: usize = 0;
-        while (i < threads.current().len) : (i += 1) {
-            const ip = threads.current().items[i];
-            const instruction = instructions.items[ip];
-            switch (instruction.type) {
-                .char => {
-                    if (sp < data.len and data[sp] == @as(u8, @intCast(instruction.a.?))) {
-                        try threads.other().add(ip + 1);
-                    }
-                },
-                .match => {
-                    return true;
-                },
-                else => {
-                    try get_next_instruction(threads.current(), instructions.items, ip);
-                },
-            }
-        }
-        threads.current().clear();
-        threads.swap();
-    }
-    return false;
-}
 
 fn get_next_instruction(
+    allocator: std.mem.Allocator,
     out: *SparseThreadSet,
     instructions: []const Instruction,
-    ip: usize,
+    ip: u32,
+    sp: usize,
+    saved: []u32,
 ) !void {
     const inst = instructions[ip];
     switch (inst.type) {
-        .split => {
-            try get_next_instruction(out, instructions, inst.a.?);
-            try get_next_instruction(out, instructions, inst.b.?);
-        },
         .jump => {
-            try get_next_instruction(out, instructions, inst.a.?);
+            const new_ip = @as(u32, @intCast(@as(i32, @intCast(ip)) + inst.a.?));
+            try get_next_instruction(allocator, out, instructions, new_ip, sp, saved);
+        },
+        .split => {
+            const new_ip_a = @as(u32, @intCast(@as(i32, @intCast(ip)) + inst.a.?));
+            const new_ip_b = @as(u32, @intCast(@as(i32, @intCast(ip)) + inst.b.?));
+            try get_next_instruction(allocator, out, instructions, new_ip_a, sp, saved);
+            try get_next_instruction(allocator, out, instructions, new_ip_b, sp, saved);
+        },
+        .save => {
+            const new_saved = try allocator.alloc(u32, saved.len);
+            @memcpy(new_saved, saved);
+            new_saved[@as(u32, @intCast(inst.a.?))] = @as(u32, @intCast(sp));
+
+            const new_ip = ip + 1;
+            try get_next_instruction(allocator, out, instructions, new_ip, sp, new_saved);
         },
         else => {
-            try out.replace(ip);
+            const new_thread = try Thread.init(allocator, ip, saved);
+            try out.add(new_thread);
         },
     }
 }
