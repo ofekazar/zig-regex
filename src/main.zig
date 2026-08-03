@@ -10,22 +10,35 @@ const RegexError = error{
     EmptyAlternationUnsupported,
 };
 
-// TODO add bol eol instructions
 
-// TODO Test arena allocator | fixed size allocator for threads
+// ---- General todos to check at a later time ----
+// TODO Test memory allocation improvements effects on speed.
+
+// ---- In order todos.
+// TODO fix group. Currently groups are not collected early. Not sure how to explain this so here is an example.
+// Take this pattern (a+)(a+) and this text aaaa
+// groups could match 3 ways
+// 1. aaa a
+// 2. aa aa
+// 3. a aaa
+// The most important thing is to keep our code consistent. We need to follow rules.
+// The rules we will follow is to match like (1). match as much as we can on the leftmost group
+
 // TODO in pike vm, aggressively insert split and jump operation to keep priority
 // When a match is found, any lower priority threads should be removed, and result saved in a pointer
 // the higher priority threads should try to keep matching, any new matches should replace the saved pointer.
 // when all option are exausted, return the match. This is not a full match implementation. Our full match implementation
 // is already solid.
-
+// TODO add bol eol instructions
 // TODO add lazy operators
 // TODO Build a test suite
-// TODO Add bol/f and eol/f. With custom instraction?
 // TODO Add counted repeatitions
 // TODO implement with threads instead of backtracking
 // TODO remove the extra jump in qm
 // TODO remove tree stracture step, optimize compiler
+// TODO Cache DFA states
+// TODO Build character groups, utf-8 support
+// TODO lookahead vectorized search
 // TODO support empty alternation (|b)
 
 pub fn main(init: std.process.Init) !void {
@@ -38,8 +51,8 @@ pub fn main(init: std.process.Init) !void {
     }
     const allocator = gpa.allocator();
 
-    const pattern = "(a|b)cd+e";
-    const text = "b";
+    const pattern = "(a+)(a+)";
+    const text = "aaaa";
     // const pattern = "a+b";
     // const text = "aab";
     var program = try compile(allocator, pattern);
