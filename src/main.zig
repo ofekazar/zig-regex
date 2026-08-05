@@ -16,7 +16,7 @@ const RegexError = error{
 // Also try to reduce the amount of allocations for save groups.
 
 // ---- In order todos.
-// TODO fix group. Currently groups are not collected early. Not sure how to explain this so here is an example.
+// DONE fix group. Currently groups are not collected early. Not sure how to explain this so here is an example.
 // Take this pattern (a+)(a+) and this text aaaa
 // groups could match 3 ways
 // 1. aaa a
@@ -25,18 +25,20 @@ const RegexError = error{
 // The most important thing is to keep our code consistent. We need to follow rules.
 // The rules we will follow is to match like (1). match as much as we can on the leftmost group
 
-// TODO in pike vm, aggressively insert split and jump operation to keep priority
+// DONE in pike vm, aggressively insert split and jump operation to keep priority
 // When a match is found, any lower priority threads should be removed, and result saved in a pointer
 // the higher priority threads should try to keep matching, any new matches should replace the saved pointer.
 // when all option are exausted, return the match. This is not a full match implementation. Our full match implementation
 // is already solid.
-// TODO add bol eol instructions
-// TODO add lazy operators
+
+// DONE implement with threads instead of backtracking
+// DONE remove the extra jump in qm
+// DONE remove tree stracture step, optimize compiler
+// DONE add bol eol instructions
+
 // TODO Build a test suite
+// TODO add lazy operators
 // TODO Add counted repeatitions
-// TODO implement with threads instead of backtracking
-// TODO remove the extra jump in qm
-// TODO remove tree stracture step, optimize compiler
 // TODO Cache DFA states
 // TODO Build character groups, utf-8 support
 // TODO lookahead vectorized search
@@ -52,8 +54,8 @@ pub fn main(init: std.process.Init) !void {
     }
     const allocator = gpa.allocator();
 
-    const pattern = "(a*)(a*)";
-    const text = "aaa";
+    const pattern = "^abc$";
+    const text = "abc";
     // const pattern = "a+b";
     // const text = "aab";
     var program = try compile(allocator, pattern);
@@ -251,11 +253,22 @@ pub fn match(
     const thread0: Thread = try Thread.init(allocator, 0, groups);
     try threads.current().add(thread0);
 
+    try get_next_instruction(
+        groups_allocator,
+        threads.current(),
+        program.instructions.items,
+        0,
+        0,
+        data,
+        thread0.saved,
+    );
+
     var sp: usize = 0;
     while (sp <= data.len) : (sp += 1) {
         var i: usize = 0;
         const current = threads.current();
         const other = threads.other();
+
         // std.debug.print("{{", .{});
         // for (0..current.len) |ii| {
         //     std.debug.print(" {d} ", .{current.items[ii].ip});
@@ -267,12 +280,28 @@ pub fn match(
             switch (instruction.type) {
                 .char => {
                     if (sp < data.len and data[sp] == @as(u8, @intCast(instruction.a.?))) {
-                        try get_next_instruction(groups_allocator, other, program.instructions.items, thread.ip + 1, sp + 1, thread.saved);
+                        try get_next_instruction(
+                            groups_allocator,
+                            other,
+                            program.instructions.items,
+                            thread.ip + 1,
+                            sp + 1,
+                            data,
+                            thread.saved,
+                        );
                     }
                 },
                 .any => {
                     if (sp < data.len) {
-                        try get_next_instruction(groups_allocator, other, program.instructions.items, thread.ip + 1, sp + 1, thread.saved);
+                        try get_next_instruction(
+                            groups_allocator,
+                            other,
+                            program.instructions.items,
+                            thread.ip + 1,
+                            sp + 1,
+                            data,
+                            thread.saved,
+                        );
                     }
                 },
                 .match => {
@@ -282,9 +311,17 @@ pub fn match(
                         return .{ .allocator = allocator, .groups = result_groups, .result = true };
                     }
                 },
-                else => {
-                    try get_next_instruction(groups_allocator, other, program.instructions.items, thread.ip, sp, thread.saved);
-                }
+                .jump, .split, .save, .bol, .eol => {
+                    try get_next_instruction(
+                        groups_allocator,
+                        other,
+                        program.instructions.items,
+                        thread.ip,
+                        sp,
+                        data,
+                        thread.saved,
+                    );
+                },
             }
         }
         current.clear();
@@ -300,29 +337,42 @@ fn get_next_instruction(
     instructions: []const Instruction,
     ip: u32,
     sp: usize,
+    data: []const u8,
     saved: []u32,
 ) !void {
     const inst = instructions[ip];
     switch (inst.type) {
         .jump => {
             const new_ip = @as(u32, @intCast(@as(i32, @intCast(ip)) + inst.a.?));
-            try get_next_instruction(allocator, out, instructions, new_ip, sp, saved);
+            try get_next_instruction(allocator, out, instructions, new_ip, sp, data, saved);
         },
         .split => {
             const new_ip_a = @as(u32, @intCast(@as(i32, @intCast(ip)) + inst.a.?));
             const new_ip_b = @as(u32, @intCast(@as(i32, @intCast(ip)) + inst.b.?));
-            try get_next_instruction(allocator, out, instructions, new_ip_a, sp, saved);
-            try get_next_instruction(allocator, out, instructions, new_ip_b, sp, saved);
+            try get_next_instruction(allocator, out, instructions, new_ip_a, sp, data, saved);
+            try get_next_instruction(allocator, out, instructions, new_ip_b, sp, data, saved);
         },
         .save => {
             const new_saved = try allocator.alloc(u32, saved.len);
             @memcpy(new_saved, saved);
             new_saved[@as(u32, @intCast(inst.a.?))] = @as(u32, @intCast(sp));
 
-            const new_ip = ip + 1;
-            try get_next_instruction(allocator, out, instructions, new_ip, sp, new_saved);
+            try get_next_instruction(allocator, out, instructions, ip + 1, sp, data, new_saved);
         },
-        else => {
+        .bol => {
+            const c = if (sp < data.len) data[sp] else 0;
+            if (sp == 0 or c == '\n') {
+                try get_next_instruction(allocator, out, instructions, ip + 1, sp, data, saved);
+            }
+        },
+        .eol => {
+            const c = if (sp < data.len) data[sp] else 0;
+            const last = if (sp < data.len) false else true;
+            if (last or c == '\n') {
+                try get_next_instruction(allocator, out, instructions, ip + 1, sp, data, saved);
+            }
+        },
+        .char, .any, .match => {
             const new_thread = try Thread.init(allocator, ip, saved);
             try out.add(new_thread);
         },
@@ -336,6 +386,8 @@ const Operation = enum(u16) { // Bigger is higher precedence
     star, // *
     qm, // ?
     any, // .
+    bol, // ^
+    eol, // $
 };
 
 const GROUP_0: u16 = 1000;
@@ -344,7 +396,7 @@ pub fn compile(allocator: std.mem.Allocator, pattern: []const u8) !Program {
     var postfix = try raw2postfix(allocator, pattern);
     defer postfix.deinit(allocator);
     try debugprintpostfix(allocator, postfix.items);
-    return try postfix2vm2(allocator, postfix.items);
+    return try postfix2vm(allocator, postfix.items);
 
     // std.debug.print("before: {s}\n", .{pattern});
 }
@@ -390,6 +442,14 @@ pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !std.Array
     var group_counter: u16 = 0;
     for (extended_pattern) |c| {
         switch (c) {
+            '^' => {
+                try outputqueue.append(allocator, @intFromEnum(Operation.bol));
+                last_end = true;
+            },
+            '$' => {
+                try outputqueue.append(allocator, @intFromEnum(Operation.eol));
+                last_end = true;
+            },
             '*' => { // e
                 try outputqueue.append(allocator, @intFromEnum(Operation.star));
                 last_end = true;
@@ -412,6 +472,8 @@ pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !std.Array
                 group_counter += 1;
             },
             ')' => { // e
+                // TODO, is this next line correct?
+                try push_left_associative(allocator, &outputqueue, &operatorqueue, Operation.concat);
                 var found_group_open: u16 = 0;
                 while (operatorqueue.pop()) |op| {
                     if (op >= GROUP_0) {
@@ -485,8 +547,8 @@ const InstuctionType = enum(u8) {
     match,
     save,
     any,
-    // bol,
-    // eol,
+    bol,
+    eol,
 };
 
 const Instruction = struct {
@@ -514,6 +576,8 @@ pub fn debugprintpostfix(allocator: std.mem.Allocator, outputqueue: []const u16)
             259 => '*',
             260 => '?',
             261 => '.',
+            262 => '^',
+            263 => '$',
             else => blk: {
                 if (value < 256) {
                     break :blk @intCast(value);
@@ -533,7 +597,7 @@ pub fn debugprintpostfix(allocator: std.mem.Allocator, outputqueue: []const u16)
     std.debug.print("{s}\n", .{printable.items});
 }
 
-fn postfix2vm2(
+fn postfix2vm(
     allocator: std.mem.Allocator,
     postfix: []const u16,
 ) !Program {
@@ -664,6 +728,24 @@ fn postfix2vm2(
 
                     try fragments.append(allocator, fragment);
                 },
+                .bol => {
+                    var fragment: std.ArrayList(Instruction) = .empty;
+                    try fragment.append(allocator, .{
+                        .type = .bol,
+                        .a = null,
+                        .b = null,
+                    });
+                    try fragments.append(allocator, fragment);
+                },
+                .eol => {
+                    var fragment: std.ArrayList(Instruction) = .empty;
+                    try fragment.append(allocator, .{
+                        .type = .eol,
+                        .a = null,
+                        .b = null,
+                    });
+                    try fragments.append(allocator, fragment);
+                },
             }
         }
     }
@@ -704,7 +786,6 @@ pub fn debugPrintInstructionGroups(
                     .{ @as(u8, @intCast(value)), value },
                 );
             },
-
             .save => {
                 const value = inst.a orelse {
                     std.debug.print("save <missing operand>\n", .{});
@@ -716,7 +797,6 @@ pub fn debugPrintInstructionGroups(
                     .{value},
                 );
             },
-
             .jump => {
                 if (inst.a) |offset| {
                     std.debug.print("jump {d}\n", .{offset});
@@ -724,7 +804,6 @@ pub fn debugPrintInstructionGroups(
                     std.debug.print("jump <missing operand>\n", .{});
                 }
             },
-
             .split => {
                 if (inst.a != null and inst.b != null) {
                     std.debug.print(
@@ -736,13 +815,10 @@ pub fn debugPrintInstructionGroups(
                 }
             },
 
-            .match => {
-                std.debug.print("match\n", .{});
-            },
-
-            .any => {
-                std.debug.print("any\n", .{});
-            },
+            .match => std.debug.print("match\n", .{}),
+            .any => std.debug.print("any\n", .{}),
+            .bol => std.debug.print("bol\n", .{}),
+            .eol => std.debug.print("eol\n", .{}),
         }
     }
 
