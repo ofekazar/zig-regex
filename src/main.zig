@@ -52,8 +52,8 @@ pub fn main(init: std.process.Init) !void {
     }
     const allocator = gpa.allocator();
 
-    const pattern = "(a|aa)";
-    const text = "aa";
+    const pattern = "(a*)(a*)";
+    const text = "aaa";
     // const pattern = "a+b";
     // const text = "aab";
     var program = try compile(allocator, pattern);
@@ -267,12 +267,12 @@ pub fn match(
             switch (instruction.type) {
                 .char => {
                     if (sp < data.len and data[sp] == @as(u8, @intCast(instruction.a.?))) {
-                        try get_next_instruction(groups_allocator, other, program.instructions.items, thread.ip + 1, sp, thread.saved);
+                        try get_next_instruction(groups_allocator, other, program.instructions.items, thread.ip + 1, sp + 1, thread.saved);
                     }
                 },
                 .any => {
                     if (sp < data.len) {
-                        try get_next_instruction(groups_allocator, other, program.instructions.items, thread.ip + 1, sp, thread.saved);
+                        try get_next_instruction(groups_allocator, other, program.instructions.items, thread.ip + 1, sp + 1, thread.saved);
                     }
                 },
                 .match => {
@@ -319,11 +319,7 @@ fn get_next_instruction(
             std.debug.print("saved: {d} -> {d}\n", .{@as(u32, @intCast(inst.a.?)), @as(u32, @intCast(sp)) + @as(u32, @intCast(@mod(inst.a.?, 2)))});
             const new_saved = try allocator.alloc(u32, saved.len);
             @memcpy(new_saved, saved);
-            var save_position = @as(u32, @intCast(sp));
-            if (save_position > 0) {
-                save_position += 1;
-            }
-            new_saved[@as(u32, @intCast(inst.a.?))] = save_position;
+            new_saved[@as(u32, @intCast(inst.a.?))] = @as(u32, @intCast(sp));
 
             const new_ip = ip + 1;
             try get_next_instruction(allocator, out, instructions, new_ip, sp, new_saved);
