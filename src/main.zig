@@ -52,8 +52,8 @@ pub fn main(init: std.process.Init) !void {
     }
     const allocator = gpa.allocator();
 
-    const pattern = "(a+)(a+)";
-    const text = "aaaa";
+    const pattern = "(a|aa)";
+    const text = "aa";
     // const pattern = "a+b";
     // const text = "aab";
     var program = try compile(allocator, pattern);
@@ -303,7 +303,7 @@ fn get_next_instruction(
     saved: []u32,
 ) !void {
     const inst = instructions[ip];
-    std.debug.print("ip:     {d}\n", .{ip});
+    // std.debug.print("ip:     {d}\n", .{ip});
     switch (inst.type) {
         .jump => {
             const new_ip = @as(u32, @intCast(@as(i32, @intCast(ip)) + inst.a.?));
@@ -319,7 +319,11 @@ fn get_next_instruction(
             std.debug.print("saved: {d} -> {d}\n", .{@as(u32, @intCast(inst.a.?)), @as(u32, @intCast(sp)) + @as(u32, @intCast(@mod(inst.a.?, 2)))});
             const new_saved = try allocator.alloc(u32, saved.len);
             @memcpy(new_saved, saved);
-            new_saved[@as(u32, @intCast(inst.a.?))] = @as(u32, @intCast(sp)) + @as(u32, @intCast(@mod(inst.a.?, 2)));
+            var save_position = @as(u32, @intCast(sp));
+            if (save_position > 0) {
+                save_position += 1;
+            }
+            new_saved[@as(u32, @intCast(inst.a.?))] = save_position;
 
             const new_ip = ip + 1;
             try get_next_instruction(allocator, out, instructions, new_ip, sp, new_saved);
@@ -327,7 +331,7 @@ fn get_next_instruction(
         else => {
             std.debug.print("add\n", .{});
             const new_thread = try Thread.init(allocator, ip, saved);
-            try out.replace(new_thread);
+            try out.add(new_thread);
         },
     }
 }
@@ -645,7 +649,7 @@ fn postfix2vm2(
                     }
                     try fragment.append(allocator, .{
                         .type = .jump,
-                        .a = -1 * @as(i32, @intCast(b.items.len - 1)),
+                        .a = -1 * @as(i32, @intCast(b.items.len)) - 1,
                         .b = null,
                     });
 
