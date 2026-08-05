@@ -83,17 +83,17 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // match
-    // try raw2postfix(allocator, "(ab|cd)+ef");
-    // try raw2postfix(allocator, "a?(b|cd)e*");
-    // try raw2postfix(allocator, "(ab(c|d))|ef");
-    // try raw2postfix(allocator, "a(b|c(d|e))f");
+    // try compile(allocator, "(ab|cd)+ef");
+    // try compile(allocator, "a?(b|cd)e*");
+    // try compile(allocator, "(ab(c|d))|ef");
+    // try compile(allocator, "a(b|c(d|e))f");
 
 }
 
 const Thread = struct {
     const Self = @This();
     ip: u32,
-    saved: []u32, // TODO needs to be 
+    saved: []u32, // TODO needs to be u64
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator, ip: u32, saved: []u32) !Self {
@@ -303,6 +303,7 @@ fn get_next_instruction(
     saved: []u32,
 ) !void {
     const inst = instructions[ip];
+    std.debug.print("ip:     {d}\n", .{ip});
     switch (inst.type) {
         .jump => {
             const new_ip = @as(u32, @intCast(@as(i32, @intCast(ip)) + inst.a.?));
@@ -315,16 +316,18 @@ fn get_next_instruction(
             try get_next_instruction(allocator, out, instructions, new_ip_b, sp, saved);
         },
         .save => {
+            std.debug.print("saved: {d} -> {d}\n", .{@as(u32, @intCast(inst.a.?)), @as(u32, @intCast(sp)) + @as(u32, @intCast(@mod(inst.a.?, 2)))});
             const new_saved = try allocator.alloc(u32, saved.len);
             @memcpy(new_saved, saved);
-            new_saved[@as(u32, @intCast(inst.a.?))] = @as(u32, @intCast(sp));
+            new_saved[@as(u32, @intCast(inst.a.?))] = @as(u32, @intCast(sp)) + @as(u32, @intCast(@mod(inst.a.?, 2)));
 
             const new_ip = ip + 1;
             try get_next_instruction(allocator, out, instructions, new_ip, sp, new_saved);
         },
         else => {
+            std.debug.print("add\n", .{});
             const new_thread = try Thread.init(allocator, ip, saved);
-            try out.add(new_thread);
+            try out.replace(new_thread);
         },
     }
 }
@@ -533,30 +536,6 @@ pub fn debugprintpostfix(allocator: std.mem.Allocator, outputqueue: []const u16)
     std.debug.print("{s}\n", .{printable.items});
 }
 
-/// e+
-/// L1: e codes
-/// L2: split L1, l3
-/// L3:
-///
-/// e*
-/// L1: split L2, L3
-/// L2: e codes
-///     jump L1
-/// L3:
-///
-/// e?
-/// L1: split L2, L3
-/// L2: e codes
-/// L3:
-///
-/// e1|e2
-/// L1: split L2, L3
-/// L2: e1 codes
-///     jump L4
-/// L3: e2 codes
-/// L4:
-///
-///
 fn postfix2vm2(
     allocator: std.mem.Allocator,
     postfix: []const u16,
