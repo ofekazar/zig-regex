@@ -256,11 +256,11 @@ pub fn match(
         var i: usize = 0;
         const current = threads.current();
         const other = threads.other();
-        std.debug.print("{{", .{});
-        for (0..current.len) |ii| {
-            std.debug.print(" {d} ", .{current.items[ii].ip});
-        }
-        std.debug.print("}}\n", .{});
+        // std.debug.print("{{", .{});
+        // for (0..current.len) |ii| {
+        //     std.debug.print(" {d} ", .{current.items[ii].ip});
+        // }
+        // std.debug.print("}}\n", .{});
         while (i < current.len) : (i += 1) {
             const thread = current.items[i];
             const instruction = program.instructions.items[thread.ip];
@@ -303,7 +303,6 @@ fn get_next_instruction(
     saved: []u32,
 ) !void {
     const inst = instructions[ip];
-    // std.debug.print("ip:     {d}\n", .{ip});
     switch (inst.type) {
         .jump => {
             const new_ip = @as(u32, @intCast(@as(i32, @intCast(ip)) + inst.a.?));
@@ -316,7 +315,6 @@ fn get_next_instruction(
             try get_next_instruction(allocator, out, instructions, new_ip_b, sp, saved);
         },
         .save => {
-            std.debug.print("saved: {d} -> {d}\n", .{@as(u32, @intCast(inst.a.?)), @as(u32, @intCast(sp)) + @as(u32, @intCast(@mod(inst.a.?, 2)))});
             const new_saved = try allocator.alloc(u32, saved.len);
             @memcpy(new_saved, saved);
             new_saved[@as(u32, @intCast(inst.a.?))] = @as(u32, @intCast(sp));
@@ -325,7 +323,6 @@ fn get_next_instruction(
             try get_next_instruction(allocator, out, instructions, new_ip, sp, new_saved);
         },
         else => {
-            std.debug.print("add\n", .{});
             const new_thread = try Thread.init(allocator, ip, saved);
             try out.add(new_thread);
         },
