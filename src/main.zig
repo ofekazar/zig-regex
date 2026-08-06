@@ -830,24 +830,51 @@ pub fn debugPrintInstructionGroups(
 }
 
 
-test "test (a+)(a+) grouping" {
+test "capture groups" {
     const allocator = std.testing.allocator;
-    const pattern = "^(a+)(a+)$";
-    const text = "aaaa";
-    var program = try compile(allocator, pattern);
-    defer program.instructions.deinit(allocator);
 
-    try debugPrintInstructionGroups(program.instructions);
+    const Case = struct {
+        pattern: []const u8,
+        text: []const u8,
+        expected: []const u32,
+    };
 
-    const result = try match(allocator, program, text);
-    defer result.deinit();
+    const cases = [_]Case{
+        .{
+            .pattern = "^(a+)(a+)$",
+            .text = "aaaa",
+            .expected = &.{ 0, 4, 0, 3, 3, 4 },
+        },
+        .{
+            .pattern = "^(a*)(a*)$",
+            .text = "aaa",
+            .expected = &.{ 0, 3, 0, 3, 3, 3 },
+        },
+        .{
+            .pattern = "^(a+)$",
+            .text = "aaaa",
+            .expected = &.{ 0, 4, 0, 4 },
+        },
+        .{
+            .pattern = "^(a|aa)$",
+            .text = "aa",
+            .expected = &.{ 0, 2, 0, 2 },
+        },
+    };
 
-    const groups = result.groups.?;
-    try std.testing.expectEqual(groups.len, 6);
-    try std.testing.expectEqual(groups[0], 0);
-    try std.testing.expectEqual(groups[1], 4);
-    try std.testing.expectEqual(groups[2], 0);
-    try std.testing.expectEqual(groups[3], 3);
-    try std.testing.expectEqual(groups[4], 3);
-    try std.testing.expectEqual(groups[5], 4);
+    for (cases) |case| {
+        var program = try compile(allocator, case.pattern);
+        defer program.instructions.deinit(allocator);
+
+        const result = try match(allocator, program, case.text);
+        defer result.deinit();
+
+        const groups = result.groups.?;
+
+        try std.testing.expectEqual(case.expected.len, groups.len);
+
+        for (case.expected, groups) |expected, actual| {
+            try std.testing.expectEqual(expected, actual);
+        }
+    }
 }
