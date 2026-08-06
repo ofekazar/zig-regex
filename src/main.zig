@@ -443,10 +443,16 @@ pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !std.Array
     for (extended_pattern) |c| {
         switch (c) {
             '^' => {
+                if (last_end) {
+                    try push_left_associative(allocator, &outputqueue, &operatorqueue, Operation.concat);
+                }
                 try outputqueue.append(allocator, @intFromEnum(Operation.bol));
                 last_end = true;
             },
             '$' => {
+                if (last_end) {
+                    try push_left_associative(allocator, &outputqueue, &operatorqueue, Operation.concat);
+                }
                 try outputqueue.append(allocator, @intFromEnum(Operation.eol));
                 last_end = true;
             },
@@ -472,8 +478,6 @@ pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !std.Array
                 group_counter += 1;
             },
             ')' => { // e
-                // TODO, is this next line correct?
-                try push_left_associative(allocator, &outputqueue, &operatorqueue, Operation.concat);
                 var found_group_open: u16 = 0;
                 while (operatorqueue.pop()) |op| {
                     if (op >= GROUP_0) {
@@ -823,4 +827,27 @@ pub fn debugPrintInstructionGroups(
     }
 
     std.debug.print("\n", .{});
+}
+
+
+test "test (a+)(a+) grouping" {
+    const allocator = std.testing.allocator;
+    const pattern = "^(a+)(a+)$";
+    const text = "aaaa";
+    var program = try compile(allocator, pattern);
+    defer program.instructions.deinit(allocator);
+
+    try debugPrintInstructionGroups(program.instructions);
+
+    const result = try match(allocator, program, text);
+    defer result.deinit();
+
+    const groups = result.groups.?;
+    try std.testing.expectEqual(groups.len, 6);
+    try std.testing.expectEqual(groups[0], 0);
+    try std.testing.expectEqual(groups[1], 4);
+    try std.testing.expectEqual(groups[2], 0);
+    try std.testing.expectEqual(groups[3], 3);
+    try std.testing.expectEqual(groups[4], 3);
+    try std.testing.expectEqual(groups[5], 4);
 }
