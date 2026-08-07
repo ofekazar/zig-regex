@@ -35,13 +35,27 @@ const RegexError = error{
 // DONE remove the extra jump in qm
 // DONE remove tree stracture step, optimize compiler
 // DONE add bol eol instructions
+// DONE Build a test suite
+// DONE Non capturing group (?:e)
 
-// TODO Build a test suite
-// TODO add lazy operators
+// TODO support literals \\ \{ \( etc.
 // TODO Add counted repeatitions
-// TODO Cache DFA states
-// TODO Build character groups, utf-8 support
+// e{n} - exactly n times
+// e{n,} - n times or more
+// e{n,m} - between n and m
+// Find out what n and m? are. generalize e{n} to m = n
+// Add the values as special operators to the postfix similar to groups
+// DUP_0 = 2000
+
+// TODO add lazy operators
+// all 3 counted repititions as lazy
+// * + ?
+
+// TODO Capture groups support
+// TODO UTF-8
+
 // TODO lookahead vectorized search
+// TODO Cache DFA states
 // TODO support empty alternation (|b)
 
 pub fn main(init: std.process.Init) !void {
@@ -54,8 +68,8 @@ pub fn main(init: std.process.Init) !void {
     }
     const allocator = gpa.allocator();
 
-    const pattern = "^abc$";
-    const text = "abc";
+    const pattern = "(ab)+";
+    const text = "abab";
     // const pattern = "a+b";
     // const text = "aab";
     var program = try compile(allocator, pattern);
@@ -93,6 +107,8 @@ pub fn main(init: std.process.Init) !void {
 }
 
 const Thread = struct {
+    // TODO Test what happens when we break up ip and saved to 2 different stractures in terms of allocations and
+    // cache locallity
     const Self = @This();
     ip: u32,
     saved: []u32, // TODO needs to be u64
@@ -388,8 +404,10 @@ const Operation = enum(u16) { // Bigger is higher precedence
     any, // .
     bol, // ^
     eol, // $
+    // ncgo, // (?: non capturing group open
 };
 
+const NCGO: u16 = 500;
 const GROUP_0: u16 = 1000;
 
 pub fn compile(allocator: std.mem.Allocator, pattern: []const u8) !Program {
@@ -437,50 +455,61 @@ pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !std.Array
 
     var operatorqueue: std.ArrayList(u16) = .empty;
     defer operatorqueue.deinit(allocator);
-    var last_end: bool = false;
+    var last_end: std.ArrayList(bool) = .empty;
+    defer last_end.deinit(allocator);
+    try last_end.append(allocator, false);
 
     var group_counter: u16 = 0;
-    for (extended_pattern) |c| {
-        switch (c) {
+    var i: usize = 0;
+    while (i < extended_pattern.len) : (i += 1) {
+        switch (extended_pattern[i]) {
             '^' => {
-                if (last_end) {
+                if (last_end.items[last_end.items.len-1]) {
                     try push_left_associative(allocator, &outputqueue, &operatorqueue, Operation.concat);
                 }
                 try outputqueue.append(allocator, @intFromEnum(Operation.bol));
-                last_end = true;
+                last_end.items[last_end.items.len-1] = true;
             },
             '$' => {
-                if (last_end) {
+                if (last_end.items[last_end.items.len-1]) {
                     try push_left_associative(allocator, &outputqueue, &operatorqueue, Operation.concat);
                 }
                 try outputqueue.append(allocator, @intFromEnum(Operation.eol));
-                last_end = true;
+                last_end.items[last_end.items.len-1] = true;
             },
             '*' => { // e
                 try outputqueue.append(allocator, @intFromEnum(Operation.star));
-                last_end = true;
+                last_end.items[last_end.items.len-1] = true;
             },
             '?' => { // e
                 try outputqueue.append(allocator, @intFromEnum(Operation.qm));
-                last_end = true;
+                last_end.items[last_end.items.len-1] = true;
             },
             '+' => { // e
                 try outputqueue.append(allocator, @intFromEnum(Operation.plus));
-                last_end = true;
+                last_end.items[last_end.items.len-1] = true;
             },
             '(' => { // s
-                try outputqueue.append(allocator, GROUP_0 + group_counter * 2);
-                if (last_end) {
-                    try push_left_associative(allocator, &outputqueue, &operatorqueue, Operation.concat);
+                if (i+2 < extended_pattern.len and extended_pattern[i+1] == '?' and extended_pattern[i+2] == ':') {
+                    // Non capturing group
+                    try operatorqueue.append(allocator, NCGO);
+                    i += 2;
+                } else {
+                    // Capturing group
+                    try outputqueue.append(allocator, GROUP_0 + group_counter * 2);
+                    if (last_end.items[last_end.items.len-1]) {
+                        try push_left_associative(allocator, &outputqueue, &operatorqueue, Operation.concat);
+                    }
+                    last_end.items[last_end.items.len-1] = true;
+                    try operatorqueue.append(allocator, GROUP_0 + group_counter * 2);
+                    group_counter += 1;
                 }
-                try operatorqueue.append(allocator, GROUP_0 + group_counter * 2);
-                last_end = false;
-                group_counter += 1;
+                try last_end.append(allocator, false);
             },
             ')' => { // e
                 var found_group_open: u16 = 0;
                 while (operatorqueue.pop()) |op| {
-                    if (op >= GROUP_0) {
+                    if (op >= GROUP_0 or op == NCGO) {
                         found_group_open = op;
                         break;
                     }
@@ -497,33 +526,47 @@ pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !std.Array
                     return error.UnmatchedClosingParenthesis;
                 }
 
-                try push_left_associative(allocator, &outputqueue, &operatorqueue, Operation.concat);
+                _ = last_end.pop();
 
-                try outputqueue.append(allocator, found_group_open + 1);
-                try outputqueue.append(allocator, @intFromEnum(Operation.concat));
+                if (last_end.items[last_end.items.len-1]) {
+                    try push_left_associative(allocator, &outputqueue, &operatorqueue, Operation.concat);
+                }
 
-                last_end = true;
+                // TODO last_end considered true here.
+                // currently we treat every group as an actual item so an empty group will raise an error ()
+                // To add support for 0 capture we need to figure out if our grouped contained anythin to add to.
+                // This could be done by changing the last_end stack to a struct with 2 booleans, 1 for last_end
+                // 1 for literal seen.
+                // Currently there is only one position when last_seen can be false at | so we could use the last
+                // seen flag for both tasks, but this is bound to break with an unfamilar maintainer.
+
+                if (found_group_open != NCGO) {
+                    try outputqueue.append(allocator, found_group_open + 1);
+                    try push_left_associative(allocator, &outputqueue, &operatorqueue, Operation.concat);
+                }
+
+                last_end.items[last_end.items.len-1] = true;
             },
             '|' => { // s
-                if (!last_end) {
+                if (!last_end.items[last_end.items.len-1]) {
                     return error.EmptyAlternationUnsupported;
                 }
                 try push_left_associative(allocator, &outputqueue, &operatorqueue, Operation.split);
-                last_end = false;
+                last_end.items[last_end.items.len-1] = false;
             },
             '.' => {
-                if (last_end) {
+                if (last_end.items[last_end.items.len-1]) {
                     try push_left_associative(allocator, &outputqueue, &operatorqueue, Operation.concat);
                 }
                 try outputqueue.append(allocator, @intFromEnum(Operation.any));
-                last_end = true;
+                last_end.items[last_end.items.len-1] = true;
             },
             else => { // e s
-                if (last_end) {
+                if (last_end.items[last_end.items.len-1]) {
                     try push_left_associative(allocator, &outputqueue, &operatorqueue, Operation.concat);
                 }
-                try outputqueue.append(allocator, c);
-                last_end = true;
+                try outputqueue.append(allocator, extended_pattern[i]);
+                last_end.items[last_end.items.len-1] = true;
             },
         }
     }
