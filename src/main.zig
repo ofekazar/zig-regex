@@ -68,8 +68,8 @@ pub fn main(init: std.process.Init) !void {
     }
     const allocator = gpa.allocator();
 
-    const pattern = "(ab)+";
-    const text = "abab";
+    const pattern = "\\(ab\\)\\+";
+    const text = "(ab)+";
     // const pattern = "a+b";
     // const text = "aab";
     var program = try compile(allocator, pattern);
@@ -159,6 +159,8 @@ const SparseThreadSet = struct {
     }
 
     pub fn replace(self: *Self, value: Thread) !void {
+        // TODO. if we end up not using this. We can change this sparse set to a membered set and it could save us a few
+        // ops.
         if (value.ip >= self.capacity) {
             return error.MemberedSetValueOutOfRange;
         } else if (self.sparse[value.ip] < self.len and self.items[self.sparse[value.ip]].ip == value.ip) {
@@ -561,6 +563,20 @@ pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !std.Array
                 try outputqueue.append(allocator, @intFromEnum(Operation.any));
                 last_end.items[last_end.items.len-1] = true;
             },
+            '\\' => {
+                if (i+1 < extended_pattern.len) {
+                    i += 1;
+
+                    // TODO add special group support here. \d \w etc.
+
+                    // copy of the switch else statement
+                    if (last_end.items[last_end.items.len-1]) {
+                        try push_left_associative(allocator, &outputqueue, &operatorqueue, Operation.concat);
+                    }
+                    try outputqueue.append(allocator, extended_pattern[i]);
+                    last_end.items[last_end.items.len-1] = true;
+                }
+            },
             else => { // e s
                 if (last_end.items[last_end.items.len-1]) {
                     try push_left_associative(allocator, &outputqueue, &operatorqueue, Operation.concat);
@@ -919,5 +935,35 @@ test "capture groups" {
         for (case.expected, groups) |expected, actual| {
             try std.testing.expectEqual(expected, actual);
         }
+    }
+}
+
+
+test "literal backslash" {
+    const allocator = std.testing.allocator;
+
+    const Case = struct {
+        pattern: []const u8,
+        text: []const u8,
+    };
+
+    const cases = [_]Case{
+        .{
+            .pattern = "\\(ab\\)\\+",
+            .text = "(ab)+",
+        },
+        .{
+            .pattern = "(\\()",
+            .text = "(",
+        },
+    };
+
+    for (cases) |case| {
+        var program = try compile(allocator, case.pattern);
+        defer program.instructions.deinit(allocator);
+
+        const result = try match(allocator, program, case.text);
+        defer result.deinit();
+        try std.testing.expect(result.result);
     }
 }
