@@ -49,8 +49,7 @@ const RegexError = error{
 // Find out what n and m? are. generalize e{n} to m = n
 // Add the values as special operators to the postfix similar to groups
 // DUP_0 = 2000
-
-// TODO add lazy operators
+// DONE add lazy operators
 // all 3 counted repititions as lazy
 // * + ?
 
@@ -72,9 +71,9 @@ pub fn main(init: std.process.Init) !void {
     }
     const allocator = gpa.allocator();
 
-    const pattern = "(?:ab){2,4}a{1}a{3,}";
+    const pattern = "(a+?)(a+?)";
     std.debug.print("pattern: {s}\n", .{pattern});
-    const text = "abababaaaaaaa";
+    const text = "aaaa";
     // const pattern = "a+b";
     // const text = "aab";
     var program = try compile(allocator, pattern);
@@ -102,13 +101,6 @@ pub fn main(init: std.process.Init) !void {
             }
         }
     }
-
-    // match
-    // try compile(allocator, "(ab|cd)+ef");
-    // try compile(allocator, "a?(b|cd)e*");
-    // try compile(allocator, "(ab(c|d))|ef");
-    // try compile(allocator, "a(b|c(d|e))f");
-
 }
 
 const Thread = struct {
@@ -273,8 +265,8 @@ pub fn match(
     const groups: []u32 = try groups_allocator.alloc(u32, program.groups_count * 2);
     @memset(groups, std.math.maxInt(u32)); // This define the default value in all the groups
 
-    const thread0: Thread = try Thread.init(allocator, 0, groups);
-    try threads.current().add(thread0);
+    // const thread0: Thread = try Thread.init(allocator, 0, groups);
+    // try threads.current().add(thread0);
 
     try get_next_instruction(
         groups_allocator,
@@ -283,7 +275,7 @@ pub fn match(
         0,
         0,
         data,
-        thread0.saved,
+        groups,
     );
 
     var sp: usize = 0;
@@ -753,6 +745,11 @@ fn postfix2vm(
             var fragment: std.ArrayList(Instruction) = .empty;
             const n = c - DUP_0;
             const m = postfix[i+1] - DUP_0;
+            const eager: bool = !(
+                i+2 < postfix.len and
+                std.enums.fromInt(Operation, postfix[i+2]) != null and
+                @as(Operation, @enumFromInt(postfix[i+2])) == .qm
+            );
             var b = fragments.pop() orelse return error.InvalidPostfix;
             defer b.deinit(allocator);
             for (0..n) |_| {
@@ -763,15 +760,15 @@ fn postfix2vm(
             if (m == DUP_INF - DUP_0) {
                 try fragment.append(allocator, .{
                     .type = .split,
-                    .a = -1 * @as(i32, @intCast(b.items.len)),
-                    .b = 1,
+                    .a = if (eager) -1 * @as(i32, @intCast(b.items.len)) else 1,
+                    .b = if (eager) 1 else -1 * @as(i32, @intCast(b.items.len)),
                 });
             } else {
                 for (0..m-n) |_| {
                     try fragment.append(allocator, .{
                         .type = .split,
-                        .a = 1,
-                        .b = @as(i32, @intCast(b.items.len + 1)),
+                        .a = if (eager) 1 else @as(i32, @intCast(b.items.len + 1)),
+                        .b = if (eager) @as(i32, @intCast(b.items.len + 1)) else 1,
                     });
                     for (0..b.items.len) |fragment_index| {
                         try fragment.append(allocator, b.items[fragment_index]);
@@ -782,7 +779,8 @@ fn postfix2vm(
             if (fragment.items.len > 0) {
                 try fragments.append(allocator, fragment);
             }
-            i += 1;
+
+            i += if (!eager) 2 else 1;  // When lazy there is an extra ? character therefore 2.
         } else if (c >= GROUP_0) {
             var fragment: std.ArrayList(Instruction) = .empty;
             try fragment.append(allocator, .{
@@ -846,10 +844,16 @@ fn postfix2vm(
                     var b = fragments.pop() orelse return error.InvalidPostfix;
                     defer b.deinit(allocator);
 
+                    const eager: bool = !(
+                        i+1 < postfix.len and
+                        std.enums.fromInt(Operation, postfix[i+1]) != null and
+                        @as(Operation, @enumFromInt(postfix[i+1])) == .qm
+                    );
+                    if (!eager) i += 1;
                     try b.append(allocator, .{
                         .type = .split,
-                        .a = -1 * @as(i32, @intCast(b.items.len)),
-                        .b = 1,
+                        .a = if (eager) -1 * @as(i32, @intCast(b.items.len)) else 1,
+                        .b = if (eager) 1 else -1 * @as(i32, @intCast(b.items.len)),
                     });
 
                     try fragments.append(allocator, b);
@@ -860,10 +864,16 @@ fn postfix2vm(
                     defer b.deinit(allocator);
 
                     var fragment: std.ArrayList(Instruction) = .empty;
+                    const eager: bool = !(
+                        i+1 < postfix.len and
+                        std.enums.fromInt(Operation, postfix[i+1]) != null and
+                        @as(Operation, @enumFromInt(postfix[i+1])) == .qm
+                    );
+                    if (!eager) i += 1;
                     try fragment.append(allocator, .{
                         .type = .split,
-                        .a = 1,
-                        .b = @as(i32, @intCast(b.items.len + 2)),
+                        .a = if (eager) 1 else @as(i32, @intCast(b.items.len + 2)),
+                        .b = if (eager) @as(i32, @intCast(b.items.len + 2)) else 1,
                     });
                     for (b.items) |item| {
                         try fragment.append(allocator, item);
@@ -880,11 +890,17 @@ fn postfix2vm(
                     var b = fragments.pop() orelse return error.InvalidPostfix;
                     defer b.deinit(allocator);
 
+                    const eager: bool = !(
+                        i+1 < postfix.len and
+                        std.enums.fromInt(Operation, postfix[i+1]) != null and
+                        @as(Operation, @enumFromInt(postfix[i+1])) == .qm
+                    );
+                    if (!eager) i += 1;
                     var fragment: std.ArrayList(Instruction) = .empty;
                     try fragment.append(allocator, .{
                         .type = .split,
-                        .a = 1,
-                        .b = @as(i32, @intCast(b.items.len + 1)),
+                        .a = if (eager) 1 else @as(i32, @intCast(b.items.len + 1)),
+                        .b = if (eager) @as(i32, @intCast(b.items.len + 1)) else 1,
                     });
                     for (b.items) |item| {
                         try fragment.append(allocator, item);
@@ -990,37 +1006,14 @@ pub fn debugPrintInstructionGroups(
 }
 
 
-test "capture groups" {
+const Case = struct {
+    pattern: []const u8,
+    text: []const u8,
+    expected: []const u32,
+};
+
+fn test_cases(cases: []const Case) !void {
     const allocator = std.testing.allocator;
-
-    const Case = struct {
-        pattern: []const u8,
-        text: []const u8,
-        expected: []const u32,
-    };
-
-    const cases = [_]Case{
-        .{
-            .pattern = "^(a+)(a+)$",
-            .text = "aaaa",
-            .expected = &.{ 0, 4, 0, 3, 3, 4 },
-        },
-        .{
-            .pattern = "^(a*)(a*)$",
-            .text = "aaa",
-            .expected = &.{ 0, 3, 0, 3, 3, 3 },
-        },
-        .{
-            .pattern = "^(a+)$",
-            .text = "aaaa",
-            .expected = &.{ 0, 4, 0, 4 },
-        },
-        .{
-            .pattern = "^(a|aa)$",
-            .text = "aa",
-            .expected = &.{ 0, 2, 0, 2 },
-        },
-    };
 
     for (cases) |case| {
         var program = try compile(allocator, case.pattern);
@@ -1039,32 +1032,46 @@ test "capture groups" {
     }
 }
 
+test "capture groups" {
+    const cases = [_]Case{
+        .{ .pattern = "^(a+)(a+)$", .text = "aaaa", .expected = &.{ 0, 4, 0, 3, 3, 4 }, },
+        .{ .pattern = "^(a*)(a*)$", .text = "aaa", .expected = &.{ 0, 3, 0, 3, 3, 3 }, },
+        .{ .pattern = "^(a+)$", .text = "aaaa", .expected = &.{ 0, 4, 0, 4 }, },
+        .{ .pattern = "^(a|aa)$", .text = "aa", .expected = &.{ 0, 2, 0, 2 }, },
+        .{ .pattern = "^(a+?)(a+?)$", .text = "aaaa", .expected = &.{ 0, 4, 0, 1, 1, 4 }, },
+        .{ .pattern = "^(a*?)(a*?)$", .text = "aaa", .expected = &.{ 0, 3, 0, 0, 0, 3 }, },
+        .{ .pattern = "^(a+?)$", .text = "aaaa", .expected = &.{ 0, 4, 0, 4 }, },
+    };
+    try test_cases(&cases);
+}
+
 
 test "literal backslash" {
-    const allocator = std.testing.allocator;
-
-    const Case = struct {
-        pattern: []const u8,
-        text: []const u8,
-    };
-
     const cases = [_]Case{
-        .{
-            .pattern = "\\(ab\\)\\+",
-            .text = "(ab)+",
-        },
-        .{
-            .pattern = "(\\()",
-            .text = "(",
-        },
+        .{ .pattern = "\\(ab\\)\\+", .text = "(ab)+", .expected = &.{0, 5}, },
+        .{ .pattern = "(\\()", .text = "(", .expected = &.{0, 1, 0, 1}, },
     };
+    try test_cases(&cases);
+}
 
-    for (cases) |case| {
-        var program = try compile(allocator, case.pattern);
-        defer program.instructions.deinit(allocator);
+test "Counted reptitions" {
+    const allocator = std.testing.allocator;
+    const pattern = "(?:ab){2,4}a{1}a{3,}";
+    const text = "abababaaaaaaa";
+    var program = try compile(allocator, pattern);
+    defer program.instructions.deinit(allocator);
+    const result = try match(allocator, program, text);
+    defer result.deinit();
+    try std.testing.expect(result.result);
+}
 
-        const result = try match(allocator, program, case.text);
-        defer result.deinit();
-        try std.testing.expect(result.result);
-    }
+test "lazy counted reptitions" {
+    const cases = [_]Case{
+        .{ .pattern = "^(a{3}?)$", .text = "aaa", .expected = &.{0, 3, 0, 3}, },
+        .{ .pattern = "^(a{3,}?)a*$", .text = "aaaa", .expected = &.{0, 4, 0, 3}, },
+        .{ .pattern = "^(a{3,})a*$", .text = "aaaa", .expected = &.{0, 4, 0, 4}, },
+        .{ .pattern = "^(a{3,5}?)a*$", .text = "aaaa", .expected = &.{ 0, 4, 0, 3}, },
+        .{ .pattern = "^(a{3,5})a*$", .text = "aaaa", .expected = &.{ 0, 4, 0, 4}, },
+    };
+    try test_cases(&cases);
 }
