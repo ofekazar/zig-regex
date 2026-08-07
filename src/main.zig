@@ -8,6 +8,10 @@ const RegexError = error{
     TooManyInstructions,
     MemberedSetValueOutOfRange,
     EmptyAlternationUnsupported,
+    NoClosingCurlyBrackets,
+    NoOpeningCurlyBrackets,
+    TooManyRepititions,
+    InvalidRepititions,
 };
 
 
@@ -37,9 +41,8 @@ const RegexError = error{
 // DONE add bol eol instructions
 // DONE Build a test suite
 // DONE Non capturing group (?:e)
-
-// TODO support literals \\ \{ \( etc.
-// TODO Add counted repeatitions
+// DONE support literals \\ \{ \( etc.
+// DONE Add counted repeatitions
 // e{n} - exactly n times
 // e{n,} - n times or more
 // e{n,m} - between n and m
@@ -51,7 +54,8 @@ const RegexError = error{
 // all 3 counted repititions as lazy
 // * + ?
 
-// TODO Capture groups support
+// TODO Literal group support
+// TODO Add special case literal groups \\b \\w etc.
 // TODO UTF-8
 
 // TODO lookahead vectorized search
@@ -68,8 +72,9 @@ pub fn main(init: std.process.Init) !void {
     }
     const allocator = gpa.allocator();
 
-    const pattern = "\\(ab\\)\\+";
-    const text = "(ab)+";
+    const pattern = "(?:ab){2,4}a{1}a{3,}";
+    std.debug.print("pattern: {s}\n", .{pattern});
+    const text = "abababaaaaaaa";
     // const pattern = "a+b";
     // const text = "aab";
     var program = try compile(allocator, pattern);
@@ -406,11 +411,11 @@ const Operation = enum(u16) { // Bigger is higher precedence
     any, // .
     bol, // ^
     eol, // $
-    // ncgo, // (?: non capturing group open
 };
-
-const NCGO: u16 = 500;
-const GROUP_0: u16 = 1000;
+const NCGO: u16 = 500;     // Non capturing group open (?:
+const DUP_0: u16 = 1000;   // 1000 - 2000. Supportes repititons up to 999
+const DUP_INF: u16 = 2000; // represents an empty m
+const GROUP_0: u16 = 3000;
 
 pub fn compile(allocator: std.mem.Allocator, pattern: []const u8) !Program {
     var postfix = try raw2postfix(allocator, pattern);
@@ -446,7 +451,7 @@ pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !std.Array
     // outputqueue and operatorqueue u16 type is broken in to 3 parts:
     // 1. 0-256 are literals
     // 2. 256+ The operators in the enum Operation
-    // 3. 1000+ Group capture. The starting point is GROUP_0
+    // 3. GROUP_0+ Group capture. The starting point is GROUP_0
     // The first group is open GROUP_0 + 0, close GROUP_0 + 1
     // The second group is open GROUP_0 + 2, close GROUP_0 + 3
     // ...
@@ -464,6 +469,8 @@ pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !std.Array
     var group_counter: u16 = 0;
     var i: usize = 0;
     while (i < extended_pattern.len) : (i += 1) {
+        errdefer std.debug.print("Pattern failed at position {d} ('{c}')\n", .{i, extended_pattern[i]}); // TOOD remove this.
+
         switch (extended_pattern[i]) {
             '^' => {
                 if (last_end.items[last_end.items.len-1]) {
@@ -548,6 +555,55 @@ pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !std.Array
                 }
 
                 last_end.items[last_end.items.len-1] = true;
+            },
+            '{' => {
+                if (std.mem.indexOfScalar(u8, extended_pattern[i..], '}')) |e| {
+                    if (std.mem.indexOfScalar(u8, extended_pattern[i..i+e], ',')) |comma_position| {
+                        const n = try std.fmt.parseInt(u16, extended_pattern[i+1..i+comma_position], 10);
+                        const m  = if (comma_position + 1 == e)
+                                            DUP_INF - DUP_0
+                                        else
+                                            try std.fmt.parseInt(u16, extended_pattern[i+comma_position+1..i+e], 10);
+
+                        if (DUP_0 + n >= DUP_INF or DUP_0 + m > DUP_INF) {
+                            return error.TooManyRepititions;
+                        }
+                        if (n > m) {
+                            return error.InvalidRepititions;
+                        }
+
+                        if (n == 0 and m == DUP_INF - DUP_0) {
+                            try outputqueue.append(allocator, @intFromEnum(Operation.star));
+                        } else if (n == 1 and m == DUP_INF - DUP_0) {
+                            try outputqueue.append(allocator, @intFromEnum(Operation.plus));
+                        } else if (n == 0 and m == 1) {
+                            try outputqueue.append(allocator, @intFromEnum(Operation.qm));
+                        } else if (n == 1 and m == 1) {
+                            // Do nothing
+                        } else {
+                            try outputqueue.append(allocator, DUP_0 + n);
+                            try outputqueue.append(allocator, DUP_0 + m);
+                        }
+                    } else {
+                        const n = try std.fmt.parseInt(u16, extended_pattern[i+1..i+e], 10);
+                        if (DUP_0 + n >= DUP_INF) {
+                            return error.TooManyRepititions;
+                        }
+
+                        if (n == 1) {
+                            // Do nothing
+                        } else {
+                            try outputqueue.append(allocator, DUP_0 + n);
+                            try outputqueue.append(allocator, DUP_0 + n);
+                        }
+                    }
+                    i += e;
+                } else {
+                    return error.NoClosingCurlyBrackets;
+                }
+            },
+            '}' => {
+                return error.NoOpeningCurlyBrackets;
             },
             '|' => { // s
                 if (!last_end.items[last_end.items.len-1]) {
@@ -647,7 +703,7 @@ pub fn debugprintpostfix(allocator: std.mem.Allocator, outputqueue: []const u16)
                 } else if (value >= GROUP_0) {
                     break :blk @intCast(value - GROUP_0 + '0');
                 } else {
-                    break :blk null;
+                    break :blk 'x';
                 }
             },
         };
@@ -673,7 +729,9 @@ fn postfix2vm(
     }
 
     var group_max: u32 = 0;
-    for (postfix) |c| {
+    var i: usize = 0;
+    while (i < postfix.len) : (i += 1) {
+        const c = postfix[i];
         if (c < 256) {
             var fragment: std.ArrayList(Instruction) = .empty;
             try fragment.append(allocator, .{
@@ -682,6 +740,49 @@ fn postfix2vm(
                 .b = null,
             });
             try fragments.append(allocator, fragment);
+        } else if (c >= DUP_0 and c <= DUP_INF) {
+            // Special cases that doesn't show up here:
+            // n == 1, m == 1    Nothing
+            // n == 0, m == 1    ?
+            // n == 0, m == inf  *
+            // n == 1, m == inf  +
+
+            if (i+1 >= postfix.len) {
+                return error.InvalidPostfix;
+            }
+            var fragment: std.ArrayList(Instruction) = .empty;
+            const n = c - DUP_0;
+            const m = postfix[i+1] - DUP_0;
+            var b = fragments.pop() orelse return error.InvalidPostfix;
+            defer b.deinit(allocator);
+            for (0..n) |_| {
+                for (0..b.items.len) |fragment_index| {
+                    try fragment.append(allocator, b.items[fragment_index]);
+                }
+            }
+            if (m == DUP_INF - DUP_0) {
+                try fragment.append(allocator, .{
+                    .type = .split,
+                    .a = -1 * @as(i32, @intCast(b.items.len)),
+                    .b = 1,
+                });
+            } else {
+                for (0..m-n) |_| {
+                    try fragment.append(allocator, .{
+                        .type = .split,
+                        .a = 1,
+                        .b = @as(i32, @intCast(b.items.len + 1)),
+                    });
+                    for (0..b.items.len) |fragment_index| {
+                        try fragment.append(allocator, b.items[fragment_index]);
+                    }
+                }
+            }
+
+            if (fragment.items.len > 0) {
+                try fragments.append(allocator, fragment);
+            }
+            i += 1;
         } else if (c >= GROUP_0) {
             var fragment: std.ArrayList(Instruction) = .empty;
             try fragment.append(allocator, .{
