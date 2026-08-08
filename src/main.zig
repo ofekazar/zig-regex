@@ -12,6 +12,9 @@ const RegexError = error{
     NoOpeningCurlyBrackets,
     TooManyRepititions,
     InvalidRepititions,
+    NoOpeningSquareBrackets,
+    NoClosingSquareBrackets,
+    InvalidPattern,
 };
 
 
@@ -53,7 +56,29 @@ const RegexError = error{
 // all 3 counted repititions as lazy
 // * + ?
 
-// TODO Literal group support
+// TODO character classses support
+// I can implement it one of 2 ways
+// 1.
+// Adding a range instruction to the vm.
+// range a, c
+// It will run similar to char but will return true in case of a, b or c
+// Then we can split between differenct chars and range functions
+// [Aa-b]
+// split 1, 3
+// char A
+// jump 2
+// range a, b
+// We can then have precompiled character groups for \b \w \f etc.
+// 2.
+// A second options is a pointer to a separate compiled function for a character class
+// the command will look like
+// class 0
+// And we will have an object
+// classes: []Class
+// we will call classes[0].run(sp)
+// we can of course use the vm for the class function and merge the 2 instead of inlining but that would defet the purpose.
+
+
 // TODO Add special case literal groups \\b \\w etc.
 // TODO UTF-8
 
@@ -71,9 +96,9 @@ pub fn main(init: std.process.Init) !void {
     }
     const allocator = gpa.allocator();
 
-    const pattern = "(a+?)(a+?)";
+    const pattern = "^[a-zA-Z_][a-zA-Z0-9_]*$";
     std.debug.print("pattern: {s}\n", .{pattern});
-    const text = "aaaa";
+    const text = "hello_123";
     // const pattern = "a+b";
     // const text = "aab";
     var program = try compile(allocator, pattern);
@@ -306,6 +331,45 @@ pub fn match(
                         );
                     }
                 },
+                .neg_char => {
+                    if (sp < data.len and data[sp] != @as(u8, @intCast(instruction.a.?))) {
+                        try get_next_instruction(
+                            groups_allocator,
+                            other,
+                            program.instructions.items,
+                            thread.ip + 1,
+                            sp + 1,
+                            data,
+                            thread.saved,
+                        );
+                    }
+                },
+                .range => {
+                    if (sp < data.len and data[sp] >= @as(u8, @intCast(instruction.a.?)) and data[sp] <= @as(u8, @intCast(instruction.b.?))) {
+                        try get_next_instruction(
+                            groups_allocator,
+                            other,
+                            program.instructions.items,
+                            thread.ip + 1,
+                            sp + 1,
+                            data,
+                            thread.saved,
+                        );
+                    }
+                },
+                .neg_range => {
+                    if (sp < data.len and !(data[sp] >= @as(u8, @intCast(instruction.a.?)) and data[sp] <= @as(u8, @intCast(instruction.b.?)))) {
+                        try get_next_instruction(
+                            groups_allocator,
+                            other,
+                            program.instructions.items,
+                            thread.ip + 1,
+                            sp + 1,
+                            data,
+                            thread.saved,
+                        );
+                    }
+                },
                 .any => {
                     if (sp < data.len) {
                         try get_next_instruction(
@@ -387,7 +451,7 @@ fn get_next_instruction(
                 try get_next_instruction(allocator, out, instructions, ip + 1, sp, data, saved);
             }
         },
-        .char, .any, .match => {
+        .char, .any, .match, .neg_char, .range, .neg_range => {
             const new_thread = try Thread.init(allocator, ip, saved);
             try out.add(new_thread);
         },
@@ -403,6 +467,8 @@ const Operation = enum(u16) { // Bigger is higher precedence
     any, // .
     bol, // ^
     eol, // $
+    range, // range concat. ab<range> a-b
+    negative, // comes before a char or a range and change them to negative <neg>a ab<neg><range>
 };
 const NCGO: u16 = 500;     // Non capturing group open (?:
 const DUP_0: u16 = 1000;   // 1000 - 2000. Supportes repititons up to 999
@@ -549,53 +615,128 @@ pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !std.Array
                 last_end.items[last_end.items.len-1] = true;
             },
             '{' => {
-                if (std.mem.indexOfScalar(u8, extended_pattern[i..], '}')) |e| {
-                    if (std.mem.indexOfScalar(u8, extended_pattern[i..i+e], ',')) |comma_position| {
-                        const n = try std.fmt.parseInt(u16, extended_pattern[i+1..i+comma_position], 10);
-                        const m  = if (comma_position + 1 == e)
-                                            DUP_INF - DUP_0
-                                        else
-                                            try std.fmt.parseInt(u16, extended_pattern[i+comma_position+1..i+e], 10);
-
-                        if (DUP_0 + n >= DUP_INF or DUP_0 + m > DUP_INF) {
-                            return error.TooManyRepititions;
-                        }
-                        if (n > m) {
-                            return error.InvalidRepititions;
-                        }
-
-                        if (n == 0 and m == DUP_INF - DUP_0) {
-                            try outputqueue.append(allocator, @intFromEnum(Operation.star));
-                        } else if (n == 1 and m == DUP_INF - DUP_0) {
-                            try outputqueue.append(allocator, @intFromEnum(Operation.plus));
-                        } else if (n == 0 and m == 1) {
-                            try outputqueue.append(allocator, @intFromEnum(Operation.qm));
-                        } else if (n == 1 and m == 1) {
-                            // Do nothing
-                        } else {
-                            try outputqueue.append(allocator, DUP_0 + n);
-                            try outputqueue.append(allocator, DUP_0 + m);
-                        }
-                    } else {
-                        const n = try std.fmt.parseInt(u16, extended_pattern[i+1..i+e], 10);
-                        if (DUP_0 + n >= DUP_INF) {
-                            return error.TooManyRepititions;
-                        }
-
-                        if (n == 1) {
-                            // Do nothing
-                        } else {
-                            try outputqueue.append(allocator, DUP_0 + n);
-                            try outputqueue.append(allocator, DUP_0 + n);
-                        }
-                    }
-                    i += e;
-                } else {
+                const closing_brackets_end = std.mem.indexOfScalar(u8, extended_pattern[i..], '}');
+                if (closing_brackets_end == null) {
                     return error.NoClosingCurlyBrackets;
                 }
+
+                const e = closing_brackets_end.?;
+                if (std.mem.indexOfScalar(u8, extended_pattern[i..i+e], ',')) |comma_position| {
+                    const n = try std.fmt.parseInt(u16, extended_pattern[i+1..i+comma_position], 10);
+                    const m  = if (comma_position + 1 == e)
+                                        DUP_INF - DUP_0
+                                    else
+                                        try std.fmt.parseInt(u16, extended_pattern[i+comma_position+1..i+e], 10);
+
+                    if (DUP_0 + n >= DUP_INF or DUP_0 + m > DUP_INF) {
+                        return error.TooManyRepititions;
+                    }
+                    if (n > m) {
+                        return error.InvalidRepititions;
+                    }
+
+                    if (n == 0 and m == DUP_INF - DUP_0) {
+                        try outputqueue.append(allocator, @intFromEnum(Operation.star));
+                    } else if (n == 1 and m == DUP_INF - DUP_0) {
+                        try outputqueue.append(allocator, @intFromEnum(Operation.plus));
+                    } else if (n == 0 and m == 1) {
+                        try outputqueue.append(allocator, @intFromEnum(Operation.qm));
+                    } else if (n == 1 and m == 1) {
+                        // Do nothing
+                    } else {
+                        try outputqueue.append(allocator, DUP_0 + n);
+                        try outputqueue.append(allocator, DUP_0 + m);
+                    }
+                } else {
+                    const n = try std.fmt.parseInt(u16, extended_pattern[i+1..i+e], 10);
+                    if (DUP_0 + n >= DUP_INF) {
+                        return error.TooManyRepititions;
+                    }
+
+                    if (n == 1) {
+                        // Do nothing
+                    } else {
+                        try outputqueue.append(allocator, DUP_0 + n);
+                        try outputqueue.append(allocator, DUP_0 + n);
+                    }
+                }
+                i += e;
             },
             '}' => {
                 return error.NoOpeningCurlyBrackets;
+            },
+            '[' => {
+                if (last_end.items[last_end.items.len-1]) {
+                    try push_left_associative(allocator, &outputqueue, &operatorqueue, Operation.concat);
+                }
+
+                var range = false;
+                var count: usize = 0;
+
+                // Check for negative.
+                const negative = (i+1 < extended_pattern.len and extended_pattern[i+1] == '^');
+                if (negative) i += 1;
+
+                // Iterate of inputs, when \ look ahead
+                var j = i+1;
+                while (j < extended_pattern.len) : (j += 1) {
+                    switch (extended_pattern[j]) {
+                        '\\' => {
+                            j += 1;
+                            if (j >= extended_pattern.len) return error.InvalidPattern;
+
+                            // TODO special cases for \\
+
+                            if (negative and !range) {
+                                try outputqueue.append(allocator, @intFromEnum(Operation.negative));
+                            }
+                            try outputqueue.append(allocator, extended_pattern[j]);
+                            count += 1;
+
+                            if (range) {
+                                range = false;
+                                if (negative) {
+                                    try outputqueue.append(allocator, @intFromEnum(Operation.negative));
+                                }
+                                try outputqueue.append(allocator, @intFromEnum(Operation.range));
+                                count -= 1;
+                            }
+                        },
+                        '-' => {
+                            if (range) {
+                                return error.InvalidPattern;
+                            }
+                            range = true;
+                        },
+                        ']' => {
+                            break;
+                        },
+                        else => {
+                            if (negative and !range) {
+                                try outputqueue.append(allocator, @intFromEnum(Operation.negative));
+                            }
+                            try outputqueue.append(allocator, extended_pattern[j]);
+                            count += 1;
+
+                            if (range) {
+                                range = false;
+                                if (negative) {
+                                    try outputqueue.append(allocator, @intFromEnum(Operation.negative));
+                                }
+                                try outputqueue.append(allocator, @intFromEnum(Operation.range));
+                                count -= 1;
+                            }
+                        }
+                    }
+                }
+                for (0..count-1) |_| {
+                    try outputqueue.append(allocator, @intFromEnum(Operation.split));
+                }
+                i = j;
+                last_end.items[last_end.items.len-1] = true;
+            },
+            ']' => {
+                return error.NoOpeningSquareBrackets;
             },
             '|' => { // s
                 if (!last_end.items[last_end.items.len-1]) {
@@ -653,6 +794,7 @@ pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !std.Array
 
 const InstuctionType = enum(u8) {
     char,
+    neg_char,
     jump,
     split,
     match,
@@ -660,6 +802,8 @@ const InstuctionType = enum(u8) {
     any,
     bol,
     eol,
+    range,
+    neg_range,
 };
 
 const Instruction = struct {
@@ -689,6 +833,8 @@ pub fn debugprintpostfix(allocator: std.mem.Allocator, outputqueue: []const u16)
             261 => '.',
             262 => '^',
             263 => '$',
+            264 => 'R',
+            265 => '^',
             else => blk: {
                 if (value < 256) {
                     break :blk @intCast(value);
@@ -926,6 +1072,56 @@ fn postfix2vm(
                     });
                     try fragments.append(allocator, fragment);
                 },
+                .range => {
+                    var b = fragments.pop() orelse return error.InvalidPostfix;
+                    defer b.deinit(allocator);
+                    if (b.items.len != 1 or b.items[0].type != .char) return error.InvalidPostfix;
+
+                    var a = fragments.pop() orelse return error.InvalidPostfix;
+                    defer a.deinit(allocator);
+                    if (a.items.len != 1 or a.items[0].type != .char) return error.InvalidPostfix;
+
+                    var fragment: std.ArrayList(Instruction) = .empty;
+                    try fragment.append(allocator, .{
+                        .type = .range,
+                        .a = a.items[0].a,
+                        .b = b.items[0].a,
+                    });
+                    try fragments.append(allocator, fragment);
+                },
+                .negative => {
+                    i += 1;
+                    if (i >= postfix.len) return error.InvalidPostfix;
+
+                    if (postfix[i] < 256) {
+                        // TODO DUP
+                        var fragment: std.ArrayList(Instruction) = .empty;
+                        try fragment.append(allocator, .{
+                            .type = .neg_char,
+                            .a = c,
+                            .b = null,
+                        });
+                        try fragments.append(allocator, fragment);
+                    } else if (@as(Operation, @enumFromInt(postfix[i])) == .range) {
+                        var b = fragments.pop() orelse return error.InvalidPostfix;
+                        defer b.deinit(allocator);
+                        if (b.items.len != 1 or b.items[0].type != .char) return error.InvalidPostfix;
+
+                        var a = fragments.pop() orelse return error.InvalidPostfix;
+                        defer a.deinit(allocator);
+                        if (a.items.len != 1 or a.items[0].type != .char) return error.InvalidPostfix;
+
+                        var fragment: std.ArrayList(Instruction) = .empty;
+                        try fragment.append(allocator, .{
+                            .type = .neg_range,
+                            .a = a.items[0].a,
+                            .b = b.items[0].a,
+                        });
+                        try fragments.append(allocator, fragment);
+                    } else {
+                        return error.InvalidPostfix;
+                    }
+                }
             }
         }
     }
@@ -964,6 +1160,47 @@ pub fn debugPrintInstructionGroups(
                 std.debug.print(
                     "char '{c}' ({d})\n",
                     .{ @as(u8, @intCast(value)), value },
+                );
+            },
+            .neg_char => {
+                const value = inst.a orelse {
+                    std.debug.print("neg_char <missing operand>\n", .{});
+                    continue;
+                };
+
+                std.debug.print(
+                    "neg_char '{c}' ({d})\n",
+                    .{ @as(u8, @intCast(value)), value },
+                );
+            },
+            .range => {
+                const value_a = inst.a orelse {
+                    std.debug.print("range <missing operand>, b\n", .{});
+                    continue;
+                };
+                const value_b = inst.b orelse {
+                    std.debug.print("range a, <missing operand>\n", .{});
+                    continue;
+                };
+
+                std.debug.print(
+                    "range '{c}' - '{c}'\n",
+                    .{ @as(u8, @intCast(value_a)), @as(u8, @intCast(value_b)) },
+                );
+            },
+            .neg_range => {
+                const value_a = inst.a orelse {
+                    std.debug.print("neg_range <missing operand>, b\n", .{});
+                    continue;
+                };
+                const value_b = inst.a orelse {
+                    std.debug.print("neg_range a, <missing operand>\n", .{});
+                    continue;
+                };
+
+                std.debug.print(
+                    "neg_range '{c}' - '{c}')\n",
+                    .{ @as(u8, @intCast(value_a)), @as(u8, @intCast(value_b)) },
                 );
             },
             .save => {
@@ -1010,24 +1247,29 @@ const Case = struct {
     pattern: []const u8,
     text: []const u8,
     expected: []const u32,
+    success: bool = true,
 };
 
 fn test_cases(cases: []const Case) !void {
     const allocator = std.testing.allocator;
 
     for (cases) |case| {
+        std.debug.print("pattern: {s}\n", .{case.pattern});
         var program = try compile(allocator, case.pattern);
         defer program.instructions.deinit(allocator);
 
         const result = try match(allocator, program, case.text);
         defer result.deinit();
+        if (result.result) {
+            const groups = result.groups.?;
 
-        const groups = result.groups.?;
+            try std.testing.expectEqual(case.expected.len, groups.len);
 
-        try std.testing.expectEqual(case.expected.len, groups.len);
-
-        for (case.expected, groups) |expected, actual| {
-            try std.testing.expectEqual(expected, actual);
+            for (case.expected, groups) |expected, actual| {
+                try std.testing.expectEqual(expected, actual);
+            }
+        } else {
+            try std.testing.expect(!case.success);
         }
     }
 }
@@ -1072,6 +1314,19 @@ test "lazy counted reptitions" {
         .{ .pattern = "^(a{3,})a*$", .text = "aaaa", .expected = &.{0, 4, 0, 4}, },
         .{ .pattern = "^(a{3,5}?)a*$", .text = "aaaa", .expected = &.{ 0, 4, 0, 3}, },
         .{ .pattern = "^(a{3,5})a*$", .text = "aaaa", .expected = &.{ 0, 4, 0, 4}, },
+    };
+    try test_cases(&cases);
+}
+
+test "character classes" {
+    const cases = [_]Case{
+        .{ .pattern = "^[abc]$", .text = "b", .expected = &.{0, 1}, },
+        .{ .pattern = "^[a-c]$", .text = "b", .expected = &.{0, 1}, },
+        .{ .pattern = "^[a-c]$", .text = "d", .expected = &.{}, .success = false ,},
+        .{ .pattern = "^[A-Za-z0-9]$", .text = "G", .expected = &.{0, 1}, },
+        .{ .pattern = "^[A-Za-z0-9]$", .text = "7", .expected = &.{0, 1}, },
+        .{ .pattern = "^[a-zA-Z_][a-zA-Z0-9_]*$", .text = "hello_123", .expected = &.{0, 9}, },
+        .{ .pattern = "^[a-zA-Z_][a-zA-Z0-9_]*$", .text = "hello_123*", .expected = &.{}, .success = false ,},
     };
     try test_cases(&cases);
 }
