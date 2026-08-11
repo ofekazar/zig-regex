@@ -79,12 +79,22 @@ const RegexError = error{
 // we can of course use the vm for the class function and merge the 2 instead of inlining but that would defet the purpose.
 
 
+// ---- Performance ----
+// TODO Test different Classes implementations
+// TODO Add the project to rebar to compare performance against rust and re2
+// TODO Add a vectorized loop lookahead algo
+// TODO Cache DFA states.
+// TODO Remove capturing groups when not part of the pattern.
+
+
+
+// ---- Finishing touches ----
 // TODO Add special case literal groups \\b \\w etc.
 // TODO UTF-8
-
-// TODO lookahead vectorized search
-// TODO Cache DFA states
 // TODO support empty alternation (|b)
+// TODO Make a proper library API that is easy to use and takes the most efficient approch for the user automatically.
+
+const root = @import("root.zig");
 
 pub fn main(init: std.process.Init) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
@@ -96,36 +106,48 @@ pub fn main(init: std.process.Init) !void {
     }
     const allocator = gpa.allocator();
 
-    const pattern = "^[a-zA-Z_][a-zA-Z0-9_]*$";
+    const pattern = "[a-n472][083O-Z]";
     std.debug.print("pattern: {s}\n", .{pattern});
-    const text = "hello_123";
-    // const pattern = "a+b";
-    // const text = "aab";
+    // const text = "ab ab ab ab";
+    const text = try root.random_binary_test_1(allocator);
+    defer allocator.free(text);
     var program = try compile(allocator, pattern);
     defer program.instructions.deinit(allocator);
 
     try debugPrintInstructionGroups(program.instructions);
 
-    var elapsed: i96 = 0;
-    var result2: ?Match = null;
-    const start2 = std.Io.Clock.awake.now(init.io);
-    result2 = try match(allocator, program, text);
-    defer if (result2) |res| res.deinit();
-    elapsed += start2.untilNow(init.io, .awake).toNanoseconds();
-
-    std.debug.print("result is: {}. took: {d} \n", .{ result2.?.result, @divTrunc(elapsed, 1) });
-
-    const result = result2.?;
-    if (result.result) {
-        var i: usize = 0;
-        while (i < result.groups.?.len) : (i += 2) {
-            if (result.groups.?[i] == std.math.maxInt(u32)) {
-                std.debug.print("group {d}: <no_capture>\n", .{i / 2});
-            } else {
-                std.debug.print("group {d}: {d}-{d}\n", .{ i / 2, result.groups.?[i], result.groups.?[i + 1] });
-            }
-        }
+    const start = std.Io.Clock.awake.now(init.io);
+    var matches = try find_all(allocator, program, text);
+    defer matches.deinit(allocator);
+    const elapsed: i96 = start.untilNow(init.io, .awake).toNanoseconds();
+    std.debug.print("search took: {d}\n", .{elapsed});
+    for (matches.items) |item| {
+        std.debug.print("{}, ", .{item});
     }
+    std.debug.print("\n", .{});
+
+
+
+    // var elapsed: i96 = 0;
+    // var result2: ?Match = null;
+    // const start2 = std.Io.Clock.awake.now(init.io);
+    // result2 = try match(allocator, program, text);
+    // defer if (result2) |res| res.deinit();
+    // elapsed += start2.untilNow(init.io, .awake).toNanoseconds();
+
+    // std.debug.print("result is: {}. took: {d} \n", .{ result2.?.result, @divTrunc(elapsed, 1) });
+
+    // const result = result2.?;
+    // if (result.result) {
+    //     var i: usize = 0;
+    //     while (i < result.groups.?.len) : (i += 2) {
+    //         if (result.groups.?[i] == std.math.maxInt(u32)) {
+    //             std.debug.print("group {d}: <no_capture>\n", .{i / 2});
+    //         } else {
+    //             std.debug.print("group {d}: {d}-{d}\n", .{ i / 2, result.groups.?[i], result.groups.?[i + 1] });
+    //         }
+    //     }
+    // }
 }
 
 const Thread = struct {
@@ -410,6 +432,139 @@ pub fn match(
 }
 
 
+pub fn find_all(
+    allocator: std.mem.Allocator,
+    program: Program,
+    data: []const u8,
+) !std.ArrayList(u64) {
+    var threads = try Threads.init(allocator, program.instructions.items.len);
+    defer threads.deinit();
+
+    var arena_groups = std.heap.ArenaAllocator.init(allocator);
+    defer arena_groups.deinit();
+    var groups_allocator = arena_groups.allocator();
+
+    var matches: std.ArrayList(u64) = .empty;
+
+    const groups: []u32 = try groups_allocator.alloc(u32, program.groups_count * 2);
+    @memset(groups, std.math.maxInt(u32)); // This define the default value in all the groups
+
+    var sp: usize = 0;
+    while (sp <= data.len) : (sp += 1) {
+        try get_next_instruction(
+            groups_allocator,
+            threads.current(),
+            program.instructions.items,
+            0,
+            sp,
+            data,
+            groups,
+        );
+
+        var i: usize = 0;
+        const current = threads.current();
+        const other = threads.other();
+
+        // std.debug.print("{{", .{});
+        // for (0..current.len) |ii| {
+        //     std.debug.print(" {d} ", .{current.items[ii].ip});
+        // }
+        // std.debug.print("}}\n", .{});
+        while (i < current.len) : (i += 1) {
+            const thread = current.items[i];
+            const instruction = program.instructions.items[thread.ip];
+            switch (instruction.type) {
+                .char => {
+                    if (sp < data.len and data[sp] == @as(u8, @intCast(instruction.a.?))) {
+                        try get_next_instruction(
+                            groups_allocator,
+                            other,
+                            program.instructions.items,
+                            thread.ip + 1,
+                            sp + 1,
+                            data,
+                            thread.saved,
+                        );
+                    }
+                },
+                .neg_char => {
+                    if (sp < data.len and data[sp] != @as(u8, @intCast(instruction.a.?))) {
+                        try get_next_instruction(
+                            groups_allocator,
+                            other,
+                            program.instructions.items,
+                            thread.ip + 1,
+                            sp + 1,
+                            data,
+                            thread.saved,
+                        );
+                    }
+                },
+                .range => {
+                    if (sp < data.len and data[sp] >= @as(u8, @intCast(instruction.a.?)) and data[sp] <= @as(u8, @intCast(instruction.b.?))) {
+                        try get_next_instruction(
+                            groups_allocator,
+                            other,
+                            program.instructions.items,
+                            thread.ip + 1,
+                            sp + 1,
+                            data,
+                            thread.saved,
+                        );
+                    }
+                },
+                .neg_range => {
+                    if (sp < data.len and !(data[sp] >= @as(u8, @intCast(instruction.a.?)) and data[sp] <= @as(u8, @intCast(instruction.b.?)))) {
+                        try get_next_instruction(
+                            groups_allocator,
+                            other,
+                            program.instructions.items,
+                            thread.ip + 1,
+                            sp + 1,
+                            data,
+                            thread.saved,
+                        );
+                    }
+                },
+                .any => {
+                    if (sp < data.len) {
+                        try get_next_instruction(
+                            groups_allocator,
+                            other,
+                            program.instructions.items,
+                            thread.ip + 1,
+                            sp + 1,
+                            data,
+                            thread.saved,
+                        );
+                    }
+                },
+                .match => {
+                    try matches.append(allocator, thread.saved[0]);
+                    try matches.append(allocator, thread.saved[1]);
+                },
+                .jump, .split, .save, .bol, .eol => {
+                    try get_next_instruction(
+                        groups_allocator,
+                        other,
+                        program.instructions.items,
+                        thread.ip,
+                        sp,
+                        data,
+                        thread.saved,
+                    );
+                },
+            }
+        }
+        current.clear();
+        threads.swap();
+    }
+    return matches;
+}
+
+
+
+
 fn get_next_instruction(
     allocator: std.mem.Allocator,
     out: *SparseThreadSet,
@@ -666,6 +821,15 @@ pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !std.Array
                 return error.NoOpeningCurlyBrackets;
             },
             '[' => {
+                // TODO compile a character class in to a single instruction
+                // put all the possible options in to a buffer.
+                // assume vector v and character c.
+                // we load v with the class.
+                // we load c with the next character of the input
+                // we run eq which returns a vector of booleans.
+                // we map it to a bitmask and check if > 0. 0 being no match.
+                // this will change a something like this a | b | c | d | e for around 20 vm instructions to 1
+                // on the cpu side probably from 40-50 instructions to 6-7.
                 if (last_end.items[last_end.items.len-1]) {
                     try push_left_associative(allocator, &outputqueue, &operatorqueue, Operation.concat);
                 }
