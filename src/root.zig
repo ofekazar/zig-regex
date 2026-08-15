@@ -10,3 +10,19 @@ pub fn random_binary_test_1(gpa: std.mem.Allocator) ![]u8 {
     random.bytes(data);
     return data;
 }
+
+pub fn median(comptime T: type, list: []T) T {
+    comptime {
+        switch(@typeInfo(T)) {
+            .int, .float => {},
+            else => @compileError("Expected numeric type"),
+        }
+    }
+
+    if (list.len == 0) {
+        return @as(T, 0);
+    }
+
+    std.mem.sortUnstable(T, list, {}, comptime std.sort.asc(T));
+    return list[list.len/2];
+}

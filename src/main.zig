@@ -15,6 +15,7 @@ const RegexError = error{
     NoOpeningSquareBrackets,
     NoClosingSquareBrackets,
     InvalidPattern,
+    InvalidLength,
 };
 
 
@@ -106,25 +107,40 @@ pub fn main(init: std.process.Init) !void {
     }
     const allocator = gpa.allocator();
 
-    const pattern = "[a-n472][083O-Z]";
+    const pattern = "[a-m472][083N-Z]";
     std.debug.print("pattern: {s}\n", .{pattern});
     // const text = "ab ab ab ab";
     const text = try root.random_binary_test_1(allocator);
     defer allocator.free(text);
     var program = try compile(allocator, pattern);
-    defer program.instructions.deinit(allocator);
+    defer program.deinit();
 
+    // const cl = try generate_class("abcdefghijklmnop");
+    // std.debug.print("result: {} {}", .{cl.run('h'), cl.run('z')});
+    const t = i64;
+    var times: std.ArrayList(t) = .empty;
+    defer times.deinit(allocator);
     try debugPrintInstructionGroups(program.instructions);
-
-    const start = std.Io.Clock.awake.now(init.io);
-    var matches = try find_all(allocator, program, text);
-    defer matches.deinit(allocator);
-    const elapsed: i96 = start.untilNow(init.io, .awake).toNanoseconds();
-    std.debug.print("search took: {d}\n", .{elapsed});
-    for (matches.items) |item| {
-        std.debug.print("{}, ", .{item});
+    for (0..100) |_| {
+        const start = std.Io.Clock.awake.now(init.io);
+        var matches = try find_all(allocator, program, text);
+        defer matches.deinit(allocator);
+        try times.append(allocator, start.untilNow(init.io, .awake).toMicroseconds());
     }
-    std.debug.print("\n", .{});
+    const elapsed = root.median(t, times.items);
+    std.debug.print("search took: {d}\n", .{elapsed});
+
+
+
+
+
+
+
+    
+    // for (matches.items) |item| {
+    //     std.debug.print("{}, ", .{item});
+    // }
+    // std.debug.print("\n", .{});
 
 
 
@@ -275,8 +291,16 @@ const Threads = struct {
 };
 
 const Program = struct {
+    const Self = @This();
     instructions: std.ArrayList(Instruction),
     groups_count: u32,
+    classes: std.ArrayList(Class),
+    allocator: std.mem.Allocator,
+
+    fn deinit(self: *Self) void {
+        self.instructions.deinit(self.allocator);
+        self.classes.deinit(self.allocator);
+    }
     // TODO include allocator    allocator: std.mem.Allocator,
 
     // pub fn deinit()
@@ -392,6 +416,32 @@ pub fn match(
                         );
                     }
                 },
+                .class => {
+                    if (sp < data.len and program.classes.items[instruction.a.?].run(data[sp])) {
+                        try get_next_instruction(
+                            groups_allocator,
+                            other,
+                            program.instructions.items,
+                            thread.ip + 1,
+                            sp + 1,
+                            data,
+                            thread.saved,
+                        );
+                    }
+                },
+                .neg_class => {
+                    if (sp < data.len and !program.classes.items[instruction.a.?].run(data[sp])) {
+                        try get_next_instruction(
+                            groups_allocator,
+                            other,
+                            program.instructions.items,
+                            thread.ip + 1,
+                            sp + 1,
+                            data,
+                            thread.saved,
+                        );
+                    }
+                },
                 .any => {
                     if (sp < data.len) {
                         try get_next_instruction(
@@ -431,6 +481,24 @@ pub fn match(
     return .{ .result = false };
 }
 
+const V = @Vector(16, u8);
+const Class = struct {
+    const Self = @This();
+    class_vector: V,
+
+    pub fn run(self: *const Self, c: u8) bool {
+        return @reduce(.Or, self.class_vector == @as(V, @splat(c)));
+    }
+};
+fn generate_class(characters: []const u8) !Class {
+    if (characters.len != 16) {
+        return error.InvalidLength;
+    }
+    const class_vector: V = characters[0..16].*;
+    return .{
+        .class_vector = class_vector,
+    }; 
+}
 
 pub fn find_all(
     allocator: std.mem.Allocator,
@@ -526,6 +594,32 @@ pub fn find_all(
                         );
                     }
                 },
+                .class => {
+                    if (sp < data.len and program.classes.items[@as(usize, @intCast(instruction.a.?))].run(data[sp])) {
+                        try get_next_instruction(
+                            groups_allocator,
+                            other,
+                            program.instructions.items,
+                            thread.ip + 1,
+                            sp + 1,
+                            data,
+                            thread.saved,
+                        );
+                    }
+                },
+                .neg_class => {
+                    if (sp < data.len and !program.classes.items[@as(usize, @intCast(instruction.a.?))].run(data[sp])) {
+                        try get_next_instruction(
+                            groups_allocator,
+                            other,
+                            program.instructions.items,
+                            thread.ip + 1,
+                            sp + 1,
+                            data,
+                            thread.saved,
+                        );
+                    }
+                },
                 .any => {
                     if (sp < data.len) {
                         try get_next_instruction(
@@ -606,7 +700,7 @@ fn get_next_instruction(
                 try get_next_instruction(allocator, out, instructions, ip + 1, sp, data, saved);
             }
         },
-        .char, .any, .match, .neg_char, .range, .neg_range => {
+        .char, .any, .match, .neg_char, .range, .neg_range, .class, .neg_class => {
             const new_thread = try Thread.init(allocator, ip, saved);
             try out.add(new_thread);
         },
@@ -625,7 +719,10 @@ const Operation = enum(u16) { // Bigger is higher precedence
     range, // range concat. ab<range> a-b
     negative, // comes before a char or a range and change them to negative <neg>a ab<neg><range>
 };
+
 const NCGO: u16 = 500;     // Non capturing group open (?:
+const CLASS_TAG: u16 = 501;
+const NCLASS_TAG: u16 = 502;
 const DUP_0: u16 = 1000;   // 1000 - 2000. Supportes repititons up to 999
 const DUP_INF: u16 = 2000; // represents an empty m
 const GROUP_0: u16 = 3000;
@@ -821,51 +918,22 @@ pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !std.Array
                 return error.NoOpeningCurlyBrackets;
             },
             '[' => {
-                // TODO compile a character class in to a single instruction
-                // put all the possible options in to a buffer.
-                // assume vector v and character c.
-                // we load v with the class.
-                // we load c with the next character of the input
-                // we run eq which returns a vector of booleans.
-                // we map it to a bitmask and check if > 0. 0 being no match.
-                // this will change a something like this a | b | c | d | e for around 20 vm instructions to 1
-                // on the cpu side probably from 40-50 instructions to 6-7.
                 if (last_end.items[last_end.items.len-1]) {
                     try push_left_associative(allocator, &outputqueue, &operatorqueue, Operation.concat);
                 }
 
-                var range = false;
-                var count: usize = 0;
-
-                // Check for negative.
                 const negative = (i+1 < extended_pattern.len and extended_pattern[i+1] == '^');
-                if (negative) i += 1;
+                if (negative) {
+                    try outputqueue.append(allocator, NCLASS_TAG);
+                    i += 1;
+                } else {
+                    try outputqueue.append(allocator, CLASS_TAG);
+                }
 
-                // Iterate of inputs, when \ look ahead
+                var range = false;
                 var j = i+1;
                 while (j < extended_pattern.len) : (j += 1) {
                     switch (extended_pattern[j]) {
-                        '\\' => {
-                            j += 1;
-                            if (j >= extended_pattern.len) return error.InvalidPattern;
-
-                            // TODO special cases for \\
-
-                            if (negative and !range) {
-                                try outputqueue.append(allocator, @intFromEnum(Operation.negative));
-                            }
-                            try outputqueue.append(allocator, extended_pattern[j]);
-                            count += 1;
-
-                            if (range) {
-                                range = false;
-                                if (negative) {
-                                    try outputqueue.append(allocator, @intFromEnum(Operation.negative));
-                                }
-                                try outputqueue.append(allocator, @intFromEnum(Operation.range));
-                                count -= 1;
-                            }
-                        },
                         '-' => {
                             if (range) {
                                 return error.InvalidPattern;
@@ -876,28 +944,90 @@ pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !std.Array
                             break;
                         },
                         else => {
-                            if (negative and !range) {
-                                try outputqueue.append(allocator, @intFromEnum(Operation.negative));
-                            }
-                            try outputqueue.append(allocator, extended_pattern[j]);
-                            count += 1;
-
                             if (range) {
-                                range = false;
-                                if (negative) {
-                                    try outputqueue.append(allocator, @intFromEnum(Operation.negative));
+                                for (outputqueue.items[outputqueue.items.len-1]+1..extended_pattern[j]+1) |ic| {
+                                    try outputqueue.append(allocator, @intCast(ic));
                                 }
-                                try outputqueue.append(allocator, @intFromEnum(Operation.range));
-                                count -= 1;
+                                range = false;
+                            } else {
+                                try outputqueue.append(allocator, extended_pattern[j]);
                             }
                         }
                     }
                 }
-                for (0..count-1) |_| {
-                    try outputqueue.append(allocator, @intFromEnum(Operation.split));
-                }
                 i = j;
                 last_end.items[last_end.items.len-1] = true;
+
+                // NOTE IMPL B
+
+                // if (last_end.items[last_end.items.len-1]) {
+                //     try push_left_associative(allocator, &outputqueue, &operatorqueue, Operation.concat);
+                // }
+
+                // var range = false;
+                // var count: usize = 0;
+
+                // // Check for negative.
+                // const negative = (i+1 < extended_pattern.len and extended_pattern[i+1] == '^');
+                // if (negative) i += 1;
+
+                // // Iterate of inputs, when \ look ahead
+                // var j = i+1;
+                // while (j < extended_pattern.len) : (j += 1) {
+                //     switch (extended_pattern[j]) {
+                //         '\\' => {
+                //             j += 1;
+                //             if (j >= extended_pattern.len) return error.InvalidPattern;
+
+                //             // TODO special cases for \\
+
+                //             if (negative and !range) {
+                //                 try outputqueue.append(allocator, @intFromEnum(Operation.negative));
+                //             }
+                //             try outputqueue.append(allocator, extended_pattern[j]);
+                //             count += 1;
+
+                //             if (range) {
+                //                 range = false;
+                //                 if (negative) {
+                //                     try outputqueue.append(allocator, @intFromEnum(Operation.negative));
+                //                 }
+                //                 try outputqueue.append(allocator, @intFromEnum(Operation.range));
+                //                 count -= 1;
+                //             }
+                //         },
+                //         '-' => {
+                //             if (range) {
+                //                 return error.InvalidPattern;
+                //             }
+                //             range = true;
+                //         },
+                //         ']' => {
+                //             break;
+                //         },
+                //         else => {
+                //             if (negative and !range) {
+                //                 try outputqueue.append(allocator, @intFromEnum(Operation.negative));
+                //             }
+                //             try outputqueue.append(allocator, extended_pattern[j]);
+                //             count += 1;
+
+                //             if (range) {
+                //                 range = false;
+                //                 if (negative) {
+                //                     try outputqueue.append(allocator, @intFromEnum(Operation.negative));
+                //                 }
+                //                 try outputqueue.append(allocator, @intFromEnum(Operation.range));
+                //                 count -= 1;
+                //             }
+                //         }
+                //     }
+                // }
+                // for (0..count-1) |_| {
+                //     try outputqueue.append(allocator, @intFromEnum(Operation.split));
+                // }
+                // i = j;
+                // last_end.items[last_end.items.len-1] = true;
             },
             ']' => {
                 return error.NoOpeningSquareBrackets;
@@ -968,6 +1098,8 @@ const InstuctionType = enum(u8) {
     eol,
     range,
     neg_range,
+    class,
+    neg_class,
 };
 
 const Instruction = struct {
@@ -1030,6 +1162,7 @@ fn postfix2vm(
         fragments.deinit(allocator);
     }
 
+    var classes: std.ArrayList(Class) = .empty;
     var group_max: u32 = 0;
     var i: usize = 0;
     while (i < postfix.len) : (i += 1) {
@@ -1042,6 +1175,22 @@ fn postfix2vm(
                 .b = null,
             });
             try fragments.append(allocator, fragment);
+        } else if (c == CLASS_TAG or c == NCLASS_TAG) {
+            var chars: [16]u8 = undefined;
+
+            for (postfix[i + 1 .. i + 17], 0..) |cc, j| {
+                chars[j] = @intCast(cc);
+            }
+
+            try classes.append(allocator, try generate_class(&chars));
+            var fragment: std.ArrayList(Instruction) = .empty;
+            try fragment.append(allocator, .{
+                .type = if (c == CLASS_TAG) .class else .neg_class,
+                .a = @as(i32, @intCast(classes.items.len - 1)),
+                .b = null,
+            });
+            try fragments.append(allocator, fragment);
+            i += 16;
         } else if (c >= DUP_0 and c <= DUP_INF) {
             // Special cases that doesn't show up here:
             // n == 1, m == 1    Nothing
@@ -1116,7 +1265,6 @@ fn postfix2vm(
                     defer b.deinit(allocator);
                     var a = fragments.pop() orelse return error.InvalidPostfix;
                     defer a.deinit(allocator);
-
                     for (b.items) |item| {
                         try a.append(allocator, item);
                     }
@@ -1303,7 +1451,9 @@ fn postfix2vm(
 
     return .{
         .instructions = base,
-        .groups_count = (group_max + 1) / 2
+        .groups_count = (group_max + 1) / 2,
+        .classes = classes,
+        .allocator = allocator,
     };
 }
 
@@ -1335,6 +1485,28 @@ pub fn debugPrintInstructionGroups(
                 std.debug.print(
                     "neg_char '{c}' ({d})\n",
                     .{ @as(u8, @intCast(value)), value },
+                );
+            },
+            .class => {
+                const value = inst.a orelse {
+                    std.debug.print("class <missing operand>\n", .{});
+                    continue;
+                };
+
+                std.debug.print(
+                    "class {d}\n",
+                    .{ value },
+                );
+            },
+            .neg_class => {
+                const value = inst.a orelse {
+                    std.debug.print("neg_class <missing operand>\n", .{});
+                    continue;
+                };
+
+                std.debug.print(
+                    "neg_class {d}\n",
+                    .{ value },
                 );
             },
             .range => {
