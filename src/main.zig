@@ -107,7 +107,7 @@ pub fn main(init: std.process.Init) !void {
     }
     const allocator = gpa.allocator();
 
-    const pattern = "[a-m472][083N-Z]";
+    const pattern = "[a-m][N-Z]";
     std.debug.print("pattern: {s}\n", .{pattern});
     // const text = "ab ab ab ab";
     const text = try root.random_binary_test_1(allocator);
@@ -497,7 +497,7 @@ fn generate_class(characters: []const u8) !Class {
     const class_vector: V = characters[0..16].*;
     return .{
         .class_vector = class_vector,
-    }; 
+    };
 }
 
 pub fn find_all(
@@ -918,84 +918,22 @@ pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !std.Array
                 return error.NoOpeningCurlyBrackets;
             },
             '[' => {
-                if (last_end.items[last_end.items.len-1]) {
-                    try push_left_associative(allocator, &outputqueue, &operatorqueue, Operation.concat);
-                }
-
-                const negative = (i+1 < extended_pattern.len and extended_pattern[i+1] == '^');
-                if (negative) {
-                    try outputqueue.append(allocator, NCLASS_TAG);
-                    i += 1;
-                } else {
-                    try outputqueue.append(allocator, CLASS_TAG);
-                }
-
-                var range = false;
-                var j = i+1;
-                while (j < extended_pattern.len) : (j += 1) {
-                    switch (extended_pattern[j]) {
-                        '-' => {
-                            if (range) {
-                                return error.InvalidPattern;
-                            }
-                            range = true;
-                        },
-                        ']' => {
-                            break;
-                        },
-                        else => {
-                            if (range) {
-                                for (outputqueue.items[outputqueue.items.len-1]+1..extended_pattern[j]+1) |ic| {
-                                    try outputqueue.append(allocator, @intCast(ic));
-                                }
-                                range = false;
-                            } else {
-                                try outputqueue.append(allocator, extended_pattern[j]);
-                            }
-                        }
-                    }
-                }
-                i = j;
-                last_end.items[last_end.items.len-1] = true;
-
-                // NOTE IMPL B
-
                 // if (last_end.items[last_end.items.len-1]) {
                 //     try push_left_associative(allocator, &outputqueue, &operatorqueue, Operation.concat);
                 // }
 
-                // var range = false;
-                // var count: usize = 0;
-
-                // // Check for negative.
                 // const negative = (i+1 < extended_pattern.len and extended_pattern[i+1] == '^');
-                // if (negative) i += 1;
+                // if (negative) {
+                //     try outputqueue.append(allocator, NCLASS_TAG);
+                //     i += 1;
+                // } else {
+                //     try outputqueue.append(allocator, CLASS_TAG);
+                // }
 
-                // // Iterate of inputs, when \ look ahead
+                // var range = false;
                 // var j = i+1;
                 // while (j < extended_pattern.len) : (j += 1) {
                 //     switch (extended_pattern[j]) {
-                //         '\\' => {
-                //             j += 1;
-                //             if (j >= extended_pattern.len) return error.InvalidPattern;
-
-                //             // TODO special cases for \\
-
-                //             if (negative and !range) {
-                //                 try outputqueue.append(allocator, @intFromEnum(Operation.negative));
-                //             }
-                //             try outputqueue.append(allocator, extended_pattern[j]);
-                //             count += 1;
-
-                //             if (range) {
-                //                 range = false;
-                //                 if (negative) {
-                //                     try outputqueue.append(allocator, @intFromEnum(Operation.negative));
-                //                 }
-                //                 try outputqueue.append(allocator, @intFromEnum(Operation.range));
-                //                 count -= 1;
-                //             }
-                //         },
                 //         '-' => {
                 //             if (range) {
                 //                 return error.InvalidPattern;
@@ -1006,28 +944,90 @@ pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !std.Array
                 //             break;
                 //         },
                 //         else => {
-                //             if (negative and !range) {
-                //                 try outputqueue.append(allocator, @intFromEnum(Operation.negative));
-                //             }
-                //             try outputqueue.append(allocator, extended_pattern[j]);
-                //             count += 1;
-
                 //             if (range) {
-                //                 range = false;
-                //                 if (negative) {
-                //                     try outputqueue.append(allocator, @intFromEnum(Operation.negative));
+                //                 for (outputqueue.items[outputqueue.items.len-1]+1..extended_pattern[j]+1) |ic| {
+                //                     try outputqueue.append(allocator, @intCast(ic));
                 //                 }
-                //                 try outputqueue.append(allocator, @intFromEnum(Operation.range));
-                //                 count -= 1;
+                //                 range = false;
+                //             } else {
+                //                 try outputqueue.append(allocator, extended_pattern[j]);
                 //             }
                 //         }
                 //     }
                 // }
-                // for (0..count-1) |_| {
-                //     try outputqueue.append(allocator, @intFromEnum(Operation.split));
-                // }
                 // i = j;
                 // last_end.items[last_end.items.len-1] = true;
+
+                // NOTE IMPL B
+
+                if (last_end.items[last_end.items.len-1]) {
+                    try push_left_associative(allocator, &outputqueue, &operatorqueue, Operation.concat);
+                }
+
+                var range = false;
+                var count: usize = 0;
+
+                // Check for negative.
+                const negative = (i+1 < extended_pattern.len and extended_pattern[i+1] == '^');
+                if (negative) i += 1;
+
+                // Iterate of inputs, when \ look ahead
+                var j = i+1;
+                while (j < extended_pattern.len) : (j += 1) {
+                    switch (extended_pattern[j]) {
+                        '\\' => {
+                            j += 1;
+                            if (j >= extended_pattern.len) return error.InvalidPattern;
+
+                            // TODO special cases for \\
+
+                            if (negative and !range) {
+                                try outputqueue.append(allocator, @intFromEnum(Operation.negative));
+                            }
+                            try outputqueue.append(allocator, extended_pattern[j]);
+                            count += 1;
+
+                            if (range) {
+                                range = false;
+                                if (negative) {
+                                    try outputqueue.append(allocator, @intFromEnum(Operation.negative));
+                                }
+                                try outputqueue.append(allocator, @intFromEnum(Operation.range));
+                                count -= 1;
+                            }
+                        },
+                        '-' => {
+                            if (range) {
+                                return error.InvalidPattern;
+                            }
+                            range = true;
+                        },
+                        ']' => {
+                            break;
+                        },
+                        else => {
+                            if (negative and !range) {
+                                try outputqueue.append(allocator, @intFromEnum(Operation.negative));
+                            }
+                            try outputqueue.append(allocator, extended_pattern[j]);
+                            count += 1;
+
+                            if (range) {
+                                range = false;
+                                if (negative) {
+                                    try outputqueue.append(allocator, @intFromEnum(Operation.negative));
+                                }
+                                try outputqueue.append(allocator, @intFromEnum(Operation.range));
+                                count -= 1;
+                            }
+                        }
+                    }
+                }
+                for (0..count-1) |_| {
+                    try outputqueue.append(allocator, @intFromEnum(Operation.split));
+                }
+                i = j;
+                last_end.items[last_end.items.len-1] = true;
             },
             ']' => {
                 return error.NoOpeningSquareBrackets;
