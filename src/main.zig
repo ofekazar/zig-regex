@@ -87,8 +87,6 @@ const RegexError = error{
 // TODO Cache DFA states.
 // TODO Remove capturing groups when not part of the pattern.
 
-
-
 // ---- Finishing touches ----
 // TODO Enforce harder rules to prevent failed int cast.
 // TODO Add special case literal groups \\b \\w etc.
@@ -105,6 +103,16 @@ const RegexError = error{
 // pub fn match(self) ?Match; // Return a match object if the leftmost longest match, else null;
 // pub fn findAll(self) []u64; return a list with matches represented as pairs of indexes on the input data
 
+// ---- Current list of todos --- // Might dup with other lists above
+// 2. Precompile class support \b \c
+// 1. Create a nicer API, recude duplications.
+// 2. Move benchmark to test code, remove main
+// 3. Add DFA caching support
+// 4. benchmark a non dup thread group support.
+// 5. implement teddy
+// 6. utf-8
+
+
 
 const root = @import("root.zig");
 
@@ -118,11 +126,11 @@ pub fn main(init: std.process.Init) !void {
     }
     const allocator = gpa.allocator();
 
-    const pattern = "[a-m][N-Z]";
+    const pattern = "\\d\\d";
     std.debug.print("pattern: {s}\n", .{pattern});
-    // const text = "ab ab ab ab";
-    const text = try root.random_binary_test_1(allocator);
-    defer allocator.free(text);
+    const text = "12 45 a33 ab";
+    // const text = try root.random_binary_test_1(allocator);
+    // defer allocator.free(text);
     var program = try compile(allocator, pattern);
     defer program.deinit();
 
@@ -132,8 +140,8 @@ pub fn main(init: std.process.Init) !void {
     var times: std.ArrayList(t) = .empty;
     defer times.deinit(allocator);
     try debugPrintInstructionGroups(program.instructions);
-    // var matches = try find_all(allocator, program, text);
-    // defer matches.deinit(allocator);
+    var matches = try find_all(allocator, program, text);
+    defer matches.deinit(allocator);
     for (0..100) |_| {
         const start = std.Io.Clock.awake.now(init.io);
         var matches2 = try find_all(allocator, program, text);
@@ -143,10 +151,10 @@ pub fn main(init: std.process.Init) !void {
     const elapsed = root.median(t, times.items);
     std.debug.print("search took: {d}\n", .{elapsed});
 
-    // for (matches.items) |item| {
-    //     std.debug.print("{}, ", .{item});
-    // }
-    // std.debug.print("\n", .{});
+    for (matches.items) |item| {
+        std.debug.print("{}, ", .{item});
+    }
+    std.debug.print("\n", .{});
 
 
 
@@ -342,9 +350,6 @@ pub fn match(
     const groups: []u32 = try groups_allocator.alloc(u32, program.groups_count * 2);
     @memset(groups, std.math.maxInt(u32)); // This define the default value in all the groups
 
-    // const thread0: Thread = try Thread.init(allocator, 0, groups);
-    // try threads.current().add(thread0);
-
     try get_next_instruction(
         groups_allocator,
         threads.current(),
@@ -384,7 +389,12 @@ pub fn match(
                     }
                 },
                 .class => {
-                    if (sp < data.len and program.classes.items[@as(usize, @intCast(instruction.a.?))].isSet(data[sp])) {
+                    const class_index = @as(usize, @intCast(instruction.a.?));
+                    const class =   if (class_index > CLASS_TAG_END - CLASS_TAG)
+                                        special_classes[class_index-(CLASS_TAG_END - CLASS_TAG)-1]
+                                    else
+                                        program.classes.items[class_index];
+                    if (sp < data.len and class.isSet(data[sp])) {
                         try get_next_instruction(
                             groups_allocator,
                             other,
@@ -493,7 +503,12 @@ pub fn find_all(
                     }
                 },
                 .class => {
-                    if (sp < data.len and program.classes.items[@as(usize, @intCast(instruction.a.?))].isSet(data[sp])) {
+                    const class_index = @as(usize, @intCast(instruction.a.?));
+                    const class =   if (class_index > CLASS_TAG_END - CLASS_TAG)
+                                        special_classes[class_index-(CLASS_TAG_END - CLASS_TAG)-1]
+                                    else
+                                        program.classes.items[class_index];
+                    if (sp < data.len and class.isSet(data[sp])) {
                         try get_next_instruction(
                             groups_allocator,
                             other,
@@ -606,6 +621,15 @@ const Operation = enum(u16) { // Bigger is higher precedence
 const NCGO: u16 = 500;     // Non capturing group open (?:
 const CLASS_TAG: u16 = 501;
 const CLASS_TAG_END: u16 = 600;
+const SPECIAL_CLASS_TAGS: u16 = 601; //TODO
+const special_classes = [6]Class{
+    digit_class,
+    not_digit_class,
+    space_class,
+    not_space_class,
+    word_class,
+    not_word_class,
+};
 const DUP_0: u16 = 1000;   // 1000 - 2000. Supportes repititons up to 999
 const DUP_INF: u16 = 2000; // represents an empty m
 const GROUP_0: u16 = 3000;
@@ -613,7 +637,7 @@ const GROUP_0: u16 = 3000;
 pub fn compile(allocator: std.mem.Allocator, pattern: []const u8) !Program {
     var ir1 = try raw2postfix(allocator, pattern);
     defer ir1.postfix.deinit(allocator);
-    try debugprintclasses(ir1.classes.items);
+    debugprintclasses(ir1.classes.items);
     try debugprintpostfix(allocator, ir1.postfix.items);
     return try postfix2vm(allocator, ir1);
 
@@ -639,6 +663,46 @@ fn push_left_associative(
 }
 
 const Class: type = std.bit_set.StaticBitSet(256);
+
+fn notClass(comptime class: Class) Class {
+    var not_class = class;
+    not_class.toggleAll();
+    return not_class;
+}
+
+const digit_class = blk: {
+    var class: Class = .empty;
+    for ('0'..'9'+1) |c| {
+        class.set(c);
+    }
+    break :blk class;
+};
+const not_digit_class = notClass(digit_class);
+const space_class = blk: {
+    var class: Class = .empty;
+    class.set('\t');
+    class.set('\n');
+    class.set('\x0C');
+    class.set('\r');
+    class.set(' ');
+    break :blk class;
+};
+const not_space_class = notClass(space_class);
+const word_class = blk: {
+    var class: Class = .empty;
+    for ('0'..'9'+1) |c| {
+        class.set(c);
+    }
+    for ('a'..'z'+1) |c| {
+        class.set(c);
+    }
+    for ('A'..'Z'+1) |c| {
+        class.set(c);
+    }
+    class.set('_');
+    break :blk class;
+};
+const not_word_class = notClass(word_class);
 
 const IR1 = struct {
     const Self = @This();
@@ -870,18 +934,27 @@ pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !IR1 {
                 last_end.items[last_end.items.len-1] = true;
             },
             '\\' => {
-                if (i+1 < extended_pattern.len) {
-                    i += 1;
-
-                    // TODO add special group support here. \d \w etc.
-
-                    // copy of the switch else statement
-                    if (last_end.items[last_end.items.len-1]) {
-                        try push_left_associative(allocator, &outputqueue, &operatorqueue, Operation.concat);
-                    }
-                    try outputqueue.append(allocator, extended_pattern[i]);
-                    last_end.items[last_end.items.len-1] = true;
+                if (i+1 == extended_pattern.len) {
+                    return error.InvalidOperator;
                 }
+                i += 1;
+
+                if (last_end.items[last_end.items.len-1]) {
+                    try push_left_associative(allocator, &outputqueue, &operatorqueue, Operation.concat);
+                }
+
+                const escape_tag = switch (extended_pattern[i]) {
+                    'd' => SPECIAL_CLASS_TAGS + 0,
+                    'D' => SPECIAL_CLASS_TAGS + 1,
+                    's' => SPECIAL_CLASS_TAGS + 2,
+                    'S' => SPECIAL_CLASS_TAGS + 3,
+                    'w' => SPECIAL_CLASS_TAGS + 4,
+                    'W' => SPECIAL_CLASS_TAGS + 5,
+                    else => extended_pattern[i],
+                };
+
+                try outputqueue.append(allocator, escape_tag);
+                last_end.items[last_end.items.len-1] = true;
             },
             else => { // e s
                 if (last_end.items[last_end.items.len-1]) {
@@ -937,7 +1010,7 @@ const StateType = enum(u16) {
 };
 
 
-pub fn debugprintclasses(classes: []const Class) !void {
+pub fn debugprintclasses(classes: []const Class) void {
     std.debug.print("Classes:\n", .{});
     for (classes) |class| {
         std.debug.print("\t", .{});
@@ -949,6 +1022,17 @@ pub fn debugprintclasses(classes: []const Class) !void {
         }
         std.debug.print("\n", .{});
     }
+}
+
+fn debugprintclass(class: Class) void {
+    std.debug.print("\t", .{});
+    for (0..128) |c| {
+        const cu8 = @as(u8, @intCast(c));
+        if (class.isSet(cu8)) {
+            std.debug.print("{c}", .{cu8});
+        }
+    }
+    std.debug.print("\n", .{});
 }
 
 pub fn debugprintpostfix(allocator: std.mem.Allocator, outputqueue: []const u16) !void {
@@ -1011,7 +1095,7 @@ fn postfix2vm(
                 .b = null,
             });
             try fragments.append(allocator, fragment);
-        } else if (c >= CLASS_TAG and c <= CLASS_TAG_END) {
+        } else if (c >= CLASS_TAG and c < SPECIAL_CLASS_TAGS + special_classes.len) {
             var fragment: std.ArrayList(Instruction) = .empty;
             try fragment.append(allocator, .{
                 .type = .class,
