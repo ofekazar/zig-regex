@@ -57,7 +57,7 @@ const RegexError = error{
 // all 3 counted repititions as lazy
 // * + ?
 
-// TODO character classses support
+// DONE character classses support
 // I can implement it one of 2 ways
 // 1.
 // Adding a range instruction to the vm.
@@ -81,7 +81,7 @@ const RegexError = error{
 
 
 // ---- Performance ----
-// TODO Test different Classes implementations
+// DONE Test different Classes implementations
 // TODO Add the project to rebar to compare performance against rust and re2
 // TODO Add a vectorized loop lookahead algo
 // TODO Cache DFA states.
@@ -93,7 +93,17 @@ const RegexError = error{
 // TODO Add special case literal groups \\b \\w etc.
 // TODO UTF-8
 // TODO support empty alternation (|b)
+
+// -- API --
 // TODO Make a proper library API that is easy to use and takes the most efficient approch for the user automatically.
+// Public facing api starts as follows:
+// pub fn compile(pattern: []u8) Program;
+// var program: Program = compile("pattern");
+// Program functions:
+// pub fn fullMatch(self) ?Match; // Return a match object containing groups if matched the entire pattern, else null;
+// pub fn match(self) ?Match; // Return a match object if the leftmost longest match, else null;
+// pub fn findAll(self) []u64; return a list with matches represented as pairs of indexes on the input data
+
 
 const root = @import("root.zig");
 
