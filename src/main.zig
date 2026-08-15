@@ -132,7 +132,7 @@ pub fn main(init: std.process.Init) !void {
     // const text = try root.random_binary_test_1(allocator);
     // defer allocator.free(text);
     var program = try compile(allocator, pattern);
-    defer program.deinit();
+    defer program.deinit(allocator);
 
     // const cl = try generate_class("abcdefghijklmnop");
     // std.debug.print("result: {} {}", .{cl.run('h'), cl.run('z')});
@@ -140,11 +140,11 @@ pub fn main(init: std.process.Init) !void {
     var times: std.ArrayList(t) = .empty;
     defer times.deinit(allocator);
     try debugPrintInstructionGroups(program.instructions);
-    var matches = try find_all(allocator, program, text);
+    var matches = try program.findAll(allocator, text);
     defer matches.deinit(allocator);
     for (0..100) |_| {
         const start = std.Io.Clock.awake.now(init.io);
-        var matches2 = try find_all(allocator, program, text);
+        var matches2 = try program.findAll(allocator, text);
         defer matches2.deinit(allocator);
         try times.append(allocator, start.untilNow(init.io, .awake).toMicroseconds());
     }
@@ -304,26 +304,9 @@ const Threads = struct {
     }
 };
 
-const Program = struct {
-    const Self = @This();
-    instructions: std.ArrayList(Instruction),
-    groups_count: u32,
-    classes: std.ArrayList(Class),
-    allocator: std.mem.Allocator,
-
-    fn deinit(self: *Self) void {
-        self.instructions.deinit(self.allocator);
-        self.classes.deinit(self.allocator);
-    }
-    // TODO include allocator    allocator: std.mem.Allocator,
-
-    // pub fn deinit()
-};
-
 const Match = struct {
     const Self = @This();
 
-    result: bool,
     groups: ?[]u32 = null,
     allocator: ?std.mem.Allocator = null,
 
@@ -334,167 +317,143 @@ const Match = struct {
     }
 };
 
-pub fn match(
-    allocator: std.mem.Allocator,
-    program: Program,
-    data: []const u8,
-) !Match {
-    var threads = try Threads.init(allocator, program.instructions.items.len);
-    defer threads.deinit();
+const MatchType = enum {
+    leftmost_longest,
+    full_match,
+    all_matches_non_grouped,
+    all_matches_grouped,
+};
 
-    var arena_groups = std.heap.ArenaAllocator.init(allocator);
-    defer arena_groups.deinit();
-    var groups_allocator = arena_groups.allocator();
+const Program = struct {
+    const Self = @This();
+    instructions: std.ArrayList(Instruction),
+    groups_count: u32,
+    classes: std.ArrayList(Class),
 
-
-    const groups: []u32 = try groups_allocator.alloc(u32, program.groups_count * 2);
-    @memset(groups, std.math.maxInt(u32)); // This define the default value in all the groups
-
-    try get_next_instruction(
-        groups_allocator,
-        threads.current(),
-        program.instructions.items,
-        0,
-        0,
-        data,
-        groups,
-    );
-
-    var sp: usize = 0;
-    while (sp <= data.len) : (sp += 1) {
-        var i: usize = 0;
-        const current = threads.current();
-        const other = threads.other();
-
-        // std.debug.print("{{", .{});
-        // for (0..current.len) |ii| {
-        //     std.debug.print(" {d} ", .{current.items[ii].ip});
-        // }
-        // std.debug.print("}}\n", .{});
-        while (i < current.len) : (i += 1) {
-            const thread = current.items[i];
-            const instruction = program.instructions.items[thread.ip];
-            switch (instruction.type) {
-                .char => {
-                    if (sp < data.len and data[sp] == @as(u8, @intCast(instruction.a.?))) {
-                        try get_next_instruction(
-                            groups_allocator,
-                            other,
-                            program.instructions.items,
-                            thread.ip + 1,
-                            sp + 1,
-                            data,
-                            thread.saved,
-                        );
-                    }
-                },
-                .class => {
-                    const class_index = @as(usize, @intCast(instruction.a.?));
-                    const class =   if (class_index > CLASS_TAG_END - CLASS_TAG)
-                                        special_classes[class_index-(CLASS_TAG_END - CLASS_TAG)-1]
-                                    else
-                                        program.classes.items[class_index];
-                    if (sp < data.len and class.isSet(data[sp])) {
-                        try get_next_instruction(
-                            groups_allocator,
-                            other,
-                            program.instructions.items,
-                            thread.ip + 1,
-                            sp + 1,
-                            data,
-                            thread.saved,
-                        );
-                    }
-                },
-                .any => {
-                    if (sp < data.len) {
-                        try get_next_instruction(
-                            groups_allocator,
-                            other,
-                            program.instructions.items,
-                            thread.ip + 1,
-                            sp + 1,
-                            data,
-                            thread.saved,
-                        );
-                    }
-                },
-                .match => {
-                    if (sp == data.len) {
-                        const result_groups = try allocator.alloc(u32, program.groups_count * 2);
-                        @memcpy(result_groups, thread.saved);
-                        return .{ .allocator = allocator, .groups = result_groups, .result = true };
-                    }
-                },
-                .jump, .split, .save, .bol, .eol => {
-                    try get_next_instruction(
-                        groups_allocator,
-                        other,
-                        program.instructions.items,
-                        thread.ip,
-                        sp,
-                        data,
-                        thread.saved,
-                    );
-                },
-            }
-        }
-        current.clear();
-        threads.swap();
+    fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+        self.instructions.deinit(allocator);
+        self.classes.deinit(allocator);
     }
-    return .{ .result = false };
-}
 
-const V = @Vector(16, u8);
+    pub fn fullMatch(
+        self: Self,
+        allocator: std.mem.Allocator,
+        data: []const u8,
+    ) !?Match {
+        var threads = try Threads.init(allocator, self.instructions.items.len);
+        defer threads.deinit();
 
-pub fn find_all(
-    allocator: std.mem.Allocator,
-    program: Program,
-    data: []const u8,
-) !std.ArrayList(u64) {
-    var threads = try Threads.init(allocator, program.instructions.items.len);
-    defer threads.deinit();
+        var arena_groups = std.heap.ArenaAllocator.init(allocator);
+        defer arena_groups.deinit();
+        var groups_allocator = arena_groups.allocator();
 
-    var arena_groups = std.heap.ArenaAllocator.init(allocator);
-    defer arena_groups.deinit();
-    var groups_allocator = arena_groups.allocator();
 
-    var matches: std.ArrayList(u64) = .empty;
+        const groups: []u32 = try groups_allocator.alloc(u32, self.groups_count * 2);
+        @memset(groups, std.math.maxInt(u32)); // This define the default value in all the groups
 
-    const groups: []u32 = try groups_allocator.alloc(u32, program.groups_count * 2);
-    @memset(groups, std.math.maxInt(u32)); // This define the default value in all the groups
-
-    var sp: usize = 0;
-    while (sp <= data.len) : (sp += 1) {
-        try get_next_instruction(
+        try self.get_next_instruction(
             groups_allocator,
             threads.current(),
-            program.instructions.items,
             0,
-            sp,
+            0,
             data,
             groups,
         );
 
-        var i: usize = 0;
+        var sp: usize = 0;
+        while (sp < data.len) : (sp += 1) {
+            if (threads.current().items.len == 0) break;
+            if (try self.processThreads(
+                allocator,
+                groups_allocator,
+                .full_match,
+                &threads,
+                sp,
+                data,
+                null
+            )) |m| {
+                return m;
+            }
+        }
+        if (sp == data.len) {
+            for (threads.current().items) |thread| {
+                if (self.instructions.items[thread.ip].type == .match) {
+                    const result_groups = try allocator.alloc(u32, self.groups_count * 2);
+                    @memcpy(result_groups, thread.saved);
+                    return .{ .allocator = allocator, .groups = result_groups};
+                }
+            }
+        }
+        return null;
+    }
+
+    pub fn findAll(
+        self: Self,
+        allocator: std.mem.Allocator,
+        data: []const u8,
+    ) !std.ArrayList(u64) {
+        var threads = try Threads.init(allocator, self.instructions.items.len);
+        defer threads.deinit();
+
+        var arena_groups = std.heap.ArenaAllocator.init(allocator);
+        defer arena_groups.deinit();
+        var groups_allocator = arena_groups.allocator();
+
+        var matches: std.ArrayList(u64) = .empty;
+
+        const groups: []u32 = try groups_allocator.alloc(u32, self.groups_count * 2);
+        @memset(groups, std.math.maxInt(u32)); // This define the default value in all the groups
+
+        var sp: usize = 0;
+        while (sp <= data.len) : (sp += 1) {
+            try self.get_next_instruction(
+                groups_allocator,
+                threads.current(),
+                0,
+                sp,
+                data,
+                groups,
+            );
+            try self.processThreads(
+                allocator,
+                groups_allocator,
+                .all_matches_non_grouped,
+                &threads,
+                sp,
+                data,
+                &matches
+            );
+        }
+        return matches;
+    }
+
+    fn processThreads(
+        self: Self,
+        allocator: std.mem.Allocator,
+        groups_allocator: std.mem.Allocator,
+        match_type: MatchType,
+        threads: *Threads,
+        sp: usize,
+        data: []const u8,
+        matches: ?*std.ArrayList(u64),
+    ) !void {
         const current = threads.current();
         const other = threads.other();
-
         // std.debug.print("{{", .{});
         // for (0..current.len) |ii| {
         //     std.debug.print(" {d} ", .{current.items[ii].ip});
         // }
         // std.debug.print("}}\n", .{});
+        var i: usize = 0;
         while (i < current.len) : (i += 1) {
             const thread = current.items[i];
-            const instruction = program.instructions.items[thread.ip];
+            const instruction = self.instructions.items[thread.ip];
             switch (instruction.type) {
                 .char => {
                     if (sp < data.len and data[sp] == @as(u8, @intCast(instruction.a.?))) {
-                        try get_next_instruction(
+                        try self.get_next_instruction(
                             groups_allocator,
                             other,
-                            program.instructions.items,
                             thread.ip + 1,
                             sp + 1,
                             data,
@@ -507,12 +466,11 @@ pub fn find_all(
                     const class =   if (class_index > CLASS_TAG_END - CLASS_TAG)
                                         special_classes[class_index-(CLASS_TAG_END - CLASS_TAG)-1]
                                     else
-                                        program.classes.items[class_index];
+                                        self.classes.items[class_index];
                     if (sp < data.len and class.isSet(data[sp])) {
-                        try get_next_instruction(
+                        try self.get_next_instruction(
                             groups_allocator,
                             other,
-                            program.instructions.items,
                             thread.ip + 1,
                             sp + 1,
                             data,
@@ -522,10 +480,9 @@ pub fn find_all(
                 },
                 .any => {
                     if (sp < data.len) {
-                        try get_next_instruction(
+                        try self.get_next_instruction(
                             groups_allocator,
                             other,
-                            program.instructions.items,
                             thread.ip + 1,
                             sp + 1,
                             data,
@@ -533,79 +490,81 @@ pub fn find_all(
                         );
                     }
                 },
-                .match => {
-                    try matches.append(allocator, thread.saved[0]);
-                    try matches.append(allocator, thread.saved[1]);
-                },
                 .jump, .split, .save, .bol, .eol => {
-                    try get_next_instruction(
+                    try self.get_next_instruction(
                         groups_allocator,
                         other,
-                        program.instructions.items,
                         thread.ip,
                         sp,
                         data,
                         thread.saved,
                     );
                 },
+                .match => {
+                    switch (match_type) {
+                        .full_match => {}, // handled by the host function
+                        .leftmost_longest => {}, // TODO
+                        .all_matches_grouped => {}, // TODO after leftmost
+                        .all_matches_non_grouped => {
+                            try matches.?.append(allocator, thread.saved[0]);
+                            try matches.?.append(allocator, thread.saved[1]);
+                        },
+                    }
+                },
             }
         }
         current.clear();
         threads.swap();
     }
-    return matches;
-}
 
+    fn get_next_instruction(
+        self: Self,
+        allocator: std.mem.Allocator,
+        out: *SparseThreadSet,
+        ip: u32,
+        sp: usize,
+        data: []const u8,
+        saved: []u32,
+    ) !void {
+        const inst = self.instructions.items[ip];
+        switch (inst.type) {
+            .jump => {
+                const new_ip = @as(u32, @intCast(@as(i32, @intCast(ip)) + inst.a.?));
+                try self.get_next_instruction(allocator, out, new_ip, sp, data, saved);
+            },
+            .split => {
+                const new_ip_a = @as(u32, @intCast(@as(i32, @intCast(ip)) + inst.a.?));
+                const new_ip_b = @as(u32, @intCast(@as(i32, @intCast(ip)) + inst.b.?));
+                try self.get_next_instruction(allocator, out, new_ip_a, sp, data, saved);
+                try self.get_next_instruction(allocator, out, new_ip_b, sp, data, saved);
+            },
+            .save => {
+                const new_saved = try allocator.alloc(u32, saved.len);
+                @memcpy(new_saved, saved);
+                new_saved[@as(u32, @intCast(inst.a.?))] = @as(u32, @intCast(sp));
 
-
-
-fn get_next_instruction(
-    allocator: std.mem.Allocator,
-    out: *SparseThreadSet,
-    instructions: []const Instruction,
-    ip: u32,
-    sp: usize,
-    data: []const u8,
-    saved: []u32,
-) !void {
-    const inst = instructions[ip];
-    switch (inst.type) {
-        .jump => {
-            const new_ip = @as(u32, @intCast(@as(i32, @intCast(ip)) + inst.a.?));
-            try get_next_instruction(allocator, out, instructions, new_ip, sp, data, saved);
-        },
-        .split => {
-            const new_ip_a = @as(u32, @intCast(@as(i32, @intCast(ip)) + inst.a.?));
-            const new_ip_b = @as(u32, @intCast(@as(i32, @intCast(ip)) + inst.b.?));
-            try get_next_instruction(allocator, out, instructions, new_ip_a, sp, data, saved);
-            try get_next_instruction(allocator, out, instructions, new_ip_b, sp, data, saved);
-        },
-        .save => {
-            const new_saved = try allocator.alloc(u32, saved.len);
-            @memcpy(new_saved, saved);
-            new_saved[@as(u32, @intCast(inst.a.?))] = @as(u32, @intCast(sp));
-
-            try get_next_instruction(allocator, out, instructions, ip + 1, sp, data, new_saved);
-        },
-        .bol => {
-            const c = if (sp < data.len) data[sp] else 0;
-            if (sp == 0 or c == '\n') {
-                try get_next_instruction(allocator, out, instructions, ip + 1, sp, data, saved);
-            }
-        },
-        .eol => {
-            const c = if (sp < data.len) data[sp] else 0;
-            const last = if (sp < data.len) false else true;
-            if (last or c == '\n') {
-                try get_next_instruction(allocator, out, instructions, ip + 1, sp, data, saved);
-            }
-        },
-        .char, .any, .match, .class => {
-            const new_thread = try Thread.init(allocator, ip, saved);
-            try out.add(new_thread);
-        },
+                try self.get_next_instruction(allocator, out, ip + 1, sp, data, new_saved);
+            },
+            .bol => {
+                const c = if (sp < data.len) data[sp] else 0;
+                if (sp == 0 or c == '\n') {
+                    try self.get_next_instruction(allocator, out, ip + 1, sp, data, saved);
+                }
+            },
+            .eol => {
+                const c = if (sp < data.len) data[sp] else 0;
+                const last = if (sp < data.len) false else true;
+                if (last or c == '\n') {
+                    try self.get_next_instruction(allocator, out, ip + 1, sp, data, saved);
+                }
+            },
+            .char, .any, .match, .class => {
+                const new_thread = try Thread.init(allocator, ip, saved);
+                try out.add(new_thread);
+            },
+        }
     }
-}
+};
 
 const Operation = enum(u16) { // Bigger is higher precedence
     concat = 256, // implicit
@@ -1315,7 +1274,6 @@ fn postfix2vm(
         .instructions = base,
         .groups_count = (group_max + 1) / 2,
         .classes = ir1.classes,
-        .allocator = allocator,
     };
 }
 
@@ -1404,7 +1362,7 @@ fn test_cases(cases: []const Case) !void {
         var program = try compile(allocator, case.pattern);
         defer program.instructions.deinit(allocator);
 
-        const result = try match(allocator, program, case.text);
+        const result = try program.fullMatch(allocator, case.text);
         defer result.deinit();
         if (result.result) {
             const groups = result.groups.?;
@@ -1448,7 +1406,7 @@ test "Counted reptitions" {
     const text = "abababaaaaaaa";
     var program = try compile(allocator, pattern);
     defer program.instructions.deinit(allocator);
-    const result = try match(allocator, program, text);
+    const result = try program.fullMatch(allocator, text);
     defer result.deinit();
     try std.testing.expect(result.result);
 }
