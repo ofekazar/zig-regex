@@ -90,6 +90,7 @@ const RegexError = error{
 
 
 // ---- Finishing touches ----
+// TODO Enforce harder rules to prevent failed int cast.
 // TODO Add special case literal groups \\b \\w etc.
 // TODO UTF-8
 // TODO support empty alternation (|b)
@@ -382,45 +383,6 @@ pub fn match(
                         );
                     }
                 },
-                .neg_char => {
-                    if (sp < data.len and data[sp] != @as(u8, @intCast(instruction.a.?))) {
-                        try get_next_instruction(
-                            groups_allocator,
-                            other,
-                            program.instructions.items,
-                            thread.ip + 1,
-                            sp + 1,
-                            data,
-                            thread.saved,
-                        );
-                    }
-                },
-                .range => {
-                    if (sp < data.len and data[sp] >= @as(u8, @intCast(instruction.a.?)) and data[sp] <= @as(u8, @intCast(instruction.b.?))) {
-                        try get_next_instruction(
-                            groups_allocator,
-                            other,
-                            program.instructions.items,
-                            thread.ip + 1,
-                            sp + 1,
-                            data,
-                            thread.saved,
-                        );
-                    }
-                },
-                .neg_range => {
-                    if (sp < data.len and !(data[sp] >= @as(u8, @intCast(instruction.a.?)) and data[sp] <= @as(u8, @intCast(instruction.b.?)))) {
-                        try get_next_instruction(
-                            groups_allocator,
-                            other,
-                            program.instructions.items,
-                            thread.ip + 1,
-                            sp + 1,
-                            data,
-                            thread.saved,
-                        );
-                    }
-                },
                 .class => {
                     if (sp < data.len and program.classes.items[@as(usize, @intCast(instruction.a.?))].isSet(data[sp])) {
                         try get_next_instruction(
@@ -530,45 +492,6 @@ pub fn find_all(
                         );
                     }
                 },
-                .neg_char => {
-                    if (sp < data.len and data[sp] != @as(u8, @intCast(instruction.a.?))) {
-                        try get_next_instruction(
-                            groups_allocator,
-                            other,
-                            program.instructions.items,
-                            thread.ip + 1,
-                            sp + 1,
-                            data,
-                            thread.saved,
-                        );
-                    }
-                },
-                .range => {
-                    if (sp < data.len and data[sp] >= @as(u8, @intCast(instruction.a.?)) and data[sp] <= @as(u8, @intCast(instruction.b.?))) {
-                        try get_next_instruction(
-                            groups_allocator,
-                            other,
-                            program.instructions.items,
-                            thread.ip + 1,
-                            sp + 1,
-                            data,
-                            thread.saved,
-                        );
-                    }
-                },
-                .neg_range => {
-                    if (sp < data.len and !(data[sp] >= @as(u8, @intCast(instruction.a.?)) and data[sp] <= @as(u8, @intCast(instruction.b.?)))) {
-                        try get_next_instruction(
-                            groups_allocator,
-                            other,
-                            program.instructions.items,
-                            thread.ip + 1,
-                            sp + 1,
-                            data,
-                            thread.saved,
-                        );
-                    }
-                },
                 .class => {
                     if (sp < data.len and program.classes.items[@as(usize, @intCast(instruction.a.?))].isSet(data[sp])) {
                         try get_next_instruction(
@@ -662,7 +585,7 @@ fn get_next_instruction(
                 try get_next_instruction(allocator, out, instructions, ip + 1, sp, data, saved);
             }
         },
-        .char, .any, .match, .neg_char, .range, .neg_range, .class => {
+        .char, .any, .match, .class => {
             const new_thread = try Thread.init(allocator, ip, saved);
             try out.add(new_thread);
         },
@@ -678,8 +601,6 @@ const Operation = enum(u16) { // Bigger is higher precedence
     any, // .
     bol, // ^
     eol, // $
-    range, // range concat. ab<range> a-b
-    negative, // comes before a char or a range and change them to negative <neg>a ab<neg><range>
 };
 
 const NCGO: u16 = 500;     // Non capturing group open (?:
@@ -993,7 +914,6 @@ pub fn raw2postfix(allocator: std.mem.Allocator, pattern: []const u8) !IR1 {
 
 const InstuctionType = enum(u8) {
     char,
-    neg_char,
     jump,
     split,
     match,
@@ -1001,8 +921,6 @@ const InstuctionType = enum(u8) {
     any,
     bol,
     eol,
-    range,
-    neg_range,
     class,
 };
 
@@ -1294,56 +1212,6 @@ fn postfix2vm(
                     });
                     try fragments.append(allocator, fragment);
                 },
-                .range => {
-                    var b = fragments.pop() orelse return error.InvalidPostfix;
-                    defer b.deinit(allocator);
-                    if (b.items.len != 1 or b.items[0].type != .char) return error.InvalidPostfix;
-
-                    var a = fragments.pop() orelse return error.InvalidPostfix;
-                    defer a.deinit(allocator);
-                    if (a.items.len != 1 or a.items[0].type != .char) return error.InvalidPostfix;
-
-                    var fragment: std.ArrayList(Instruction) = .empty;
-                    try fragment.append(allocator, .{
-                        .type = .range,
-                        .a = a.items[0].a,
-                        .b = b.items[0].a,
-                    });
-                    try fragments.append(allocator, fragment);
-                },
-                .negative => {
-                    i += 1;
-                    if (i >= postfix.len) return error.InvalidPostfix;
-
-                    if (postfix[i] < 256) {
-                        // TODO DUP
-                        var fragment: std.ArrayList(Instruction) = .empty;
-                        try fragment.append(allocator, .{
-                            .type = .neg_char,
-                            .a = c,
-                            .b = null,
-                        });
-                        try fragments.append(allocator, fragment);
-                    } else if (@as(Operation, @enumFromInt(postfix[i])) == .range) {
-                        var b = fragments.pop() orelse return error.InvalidPostfix;
-                        defer b.deinit(allocator);
-                        if (b.items.len != 1 or b.items[0].type != .char) return error.InvalidPostfix;
-
-                        var a = fragments.pop() orelse return error.InvalidPostfix;
-                        defer a.deinit(allocator);
-                        if (a.items.len != 1 or a.items[0].type != .char) return error.InvalidPostfix;
-
-                        var fragment: std.ArrayList(Instruction) = .empty;
-                        try fragment.append(allocator, .{
-                            .type = .neg_range,
-                            .a = a.items[0].a,
-                            .b = b.items[0].a,
-                        });
-                        try fragments.append(allocator, fragment);
-                    } else {
-                        return error.InvalidPostfix;
-                    }
-                }
             }
         }
     }
@@ -1386,17 +1254,6 @@ pub fn debugPrintInstructionGroups(
                     .{ @as(u8, @intCast(value)), value },
                 );
             },
-            .neg_char => {
-                const value = inst.a orelse {
-                    std.debug.print("neg_char <missing operand>\n", .{});
-                    continue;
-                };
-
-                std.debug.print(
-                    "neg_char '{c}' ({d})\n",
-                    .{ @as(u8, @intCast(value)), value },
-                );
-            },
             .class => {
                 const value = inst.a orelse {
                     std.debug.print("class <missing operand>\n", .{});
@@ -1406,36 +1263,6 @@ pub fn debugPrintInstructionGroups(
                 std.debug.print(
                     "class {d}\n",
                     .{ value },
-                );
-            },
-            .range => {
-                const value_a = inst.a orelse {
-                    std.debug.print("range <missing operand>, b\n", .{});
-                    continue;
-                };
-                const value_b = inst.b orelse {
-                    std.debug.print("range a, <missing operand>\n", .{});
-                    continue;
-                };
-
-                std.debug.print(
-                    "range '{c}' - '{c}'\n",
-                    .{ @as(u8, @intCast(value_a)), @as(u8, @intCast(value_b)) },
-                );
-            },
-            .neg_range => {
-                const value_a = inst.a orelse {
-                    std.debug.print("neg_range <missing operand>, b\n", .{});
-                    continue;
-                };
-                const value_b = inst.a orelse {
-                    std.debug.print("neg_range a, <missing operand>\n", .{});
-                    continue;
-                };
-
-                std.debug.print(
-                    "neg_range '{c}' - '{c}')\n",
-                    .{ @as(u8, @intCast(value_a)), @as(u8, @intCast(value_b)) },
                 );
             },
             .save => {
